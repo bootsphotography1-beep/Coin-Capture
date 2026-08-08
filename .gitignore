@@ -46,3 +46,8 @@ npm-debug.log*
 .env
 .env.local
 *.local
+
+# --- Build artifacts ---
+*.tgz
+dist/
+*.apk

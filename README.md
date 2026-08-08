@@ -70,7 +70,50 @@ python run.py
 # http://192.168.1.50:8000/scan?token=some-secret-string
 ```
 
-## Quick start (Android app, native shell)
+## V3 Android shell (Capacitor scaffold)
+
+The `android-shell/` folder is also packaged as a standalone npm module for
+rebuilding and re-publishing the Android wrapper independently.
+
+```bash
+cd android-shell
+npm install
+
+# Edit capacitor.config.json — point server.url at your Mac's LAN IP
+
+# Sync web assets into the native project
+npx cap sync android
+
+# Build APK from the command line
+npm run build:debug   # APK at android/app/build/outputs/apk/debug/app-debug.apk
+npm run build:release # requires signing config
+
+# Or open in Android Studio for full IDE workflow
+npm run open
+```
+
+### Pack the Android shell as a tarball
+
+```bash
+cd android-shell
+npm run pack
+# → coinscope-android-shell-0.1.0.tgz (~240 KB)
+```
+
+The tarball contains only the source scaffold (Gradle, Java, resources, web
+loader) — no `node_modules/`, no build outputs. Recipients run
+`npm install && npx cap sync android` to regenerate `node_modules` and copy
+fresh web assets.
+
+To publish to the npm registry when you're ready:
+```bash
+cd android-shell
+npm login
+npm publish --access public
+# → https://www.npmjs.com/package/coinscope-android-shell
+```
+
+### Quick start (Android app, native shell)
 
 The `android-shell/` folder contains a Capacitor scaffold that wraps the
 backend's `/scan` page into a real Android app with full-screen, no browser

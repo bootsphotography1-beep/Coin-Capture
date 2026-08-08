@@ -1,19 +1,50 @@
 {
-  "name": "android-shell",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "coinscope-android-shell",
+  "version": "0.1.0",
+  "description": "Native Android wrapper for the Coinscope local coin scanner. Capacitor scaffold that bundles the scanner PWA into an APK that talks to a Mac-hosted FastAPI backend over Wi-Fi.",
+  "main": "www/index.html",
+  "files": [
+    "www/",
+    "android/",
+    "capacitor.config.json",
+    "README.md"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "build:debug": "cap sync android && cd android && ./gradlew assembleDebug",
+    "build:release": "cap sync android && cd android && ./gradlew assembleRelease",
+    "pack": "cap sync android && npm pack"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": [
+    "capacitor",
+    "android",
+    "coinscope",
+    "coin-scanner",
+    "numismatics",
+    "ollama",
+    "pwa",
+    "local-ai"
+  ],
+  "author": "Coinscope <finny@coinscope.local>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bootsphotography1-beep/Coin-Capture.git",
+    "directory": "android-shell"
+  },
+  "bugs": {
+    "url": "https://github.com/bootsphotography1-beep/Coin-Capture/issues"
+  },
+  "homepage": "https://github.com/bootsphotography1-beep/Coin-Capture#readme",
   "dependencies": {
     "@capacitor/android": "^6.2.1",
     "@capacitor/core": "^6.2.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.1"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
