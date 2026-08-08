@@ -51,16 +51,19 @@ def _strip_fences(text: str) -> str:
 
 def _parse_json(text: str) -> dict[str, Any]:
     cleaned = _strip_fences(text)
+    # Repair common LLM JSON mistakes: thousands-separator commas inside
+    # numbers (1,120,000 -> 1120000), trailing commas, stray double braces.
+    repaired = re.sub(r'(?<=[\d]),(?=[\d])', '', cleaned)
+    repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+    repaired = re.sub(r'\{\{', '{', repaired)
+    repaired = re.sub(r'\}\}', '}', repaired)
     try:
-        return _unwrap(json.loads(cleaned))
+        return _unwrap(json.loads(repaired))
     except json.JSONDecodeError:
         pass
-    candidate = _find_outer_json(cleaned)
+    candidate = _find_outer_json(repaired)
     if candidate:
-        repaired = re.sub(r"\{\{", "{", candidate)
-        repaired = re.sub(r"\}\}", "}", repaired)
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-        return _unwrap(json.loads(repaired))
+        return _unwrap(json.loads(candidate))
     raise ValueError(f"No JSON in rarity output: {text[:200]}")
 
 
@@ -106,7 +109,12 @@ def research_rarity(identification: dict, *, timeout_s: float = 120.0) -> dict[s
     """Call the local model to generate a rarity report from the identification.
     Returns the parsed JSON dict. Honest defaults on failure.
     """
-    prompt = _RARITY_PROMPT_TEMPLATE.format(identification=json.dumps(identification, indent=2))
+    # ensure_ascii=False keeps em-dashes, diacritics, and non-ASCII legend
+    # text as real Unicode in the prompt. See rarity_specialist.py for the
+    # full rationale (mainly: avoids LLM output inheriting broken \uXXXX
+    # escape sequences that the JSON parser then rejects).
+    ident_text = json.dumps(identification, indent=2, ensure_ascii=False)
+    prompt = _RARITY_PROMPT_TEMPLATE.format(identification=ident_text)
     body = {
         "model": config.OLLAMA_MODEL,
         "messages": [

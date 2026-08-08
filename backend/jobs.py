@@ -19,6 +19,7 @@ import config
 import db
 import ollama_client
 import rarity
+import rarity_specialist
 import condition
 import comparables
 
@@ -157,13 +158,39 @@ def _process_scan(scan_id: int, group_id: str) -> None:
         db.set_status(scan_id, "researching")
         _emit_sync({"type": "scan.status", "scan_id": scan_id, "group_id": group_id, "status": "researching"})
 
+        # Two-stage rarity resolution:
+        #   1. Canonical DB lookup (instant, deterministic, correct for known common coins)
+        #   2. Rarity-specialist model (text-only, good factual recall — only on canonical miss)
+        #   3. Generic llava rarity fallback (last resort, slower, less reliable)
         from canonical import lookup_canonical  # local import to avoid cycle
+
         report: dict | None = None
+        rarity_source = None
         if config.USE_CANONICAL_SHORTCUT:
             report = lookup_canonical(ident)
+            if report is not None:
+                rarity_source = "canonical"
+
+        # Stage 2: specialist — only when we have enough info to research
+        if report is None and rarity_specialist.has_enough_info_for_specialist(ident):
+            try:
+                report = rarity_specialist.research_rarity_specialist(ident)
+                rarity_source = "specialist"
+                log.info("Specialist succeeded for scan %s in %.1fs",
+                         scan_id, report.get("specialist_elapsed_s", -1))
+            except Exception as e:
+                log.warning(
+                    "Rarity specialist failed for scan %s (%s: %s), falling through to generic",
+                    scan_id, type(e).__name__, e,
+                )
+                report = None
+
+        # Stage 3: generic fallback (also uses llava, slower, broader)
         if report is None:
             report = rarity.research_rarity(ident)
+            rarity_source = "generic"
 
+        report["rarity_source"] = rarity_source
         db.set_rarity(scan_id, report)
         db.set_status(scan_id, "complete")
         _emit_sync({
