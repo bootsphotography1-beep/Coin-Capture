@@ -52,11 +52,20 @@ def _strip_fences(text: str) -> str:
 def _parse_json(text: str) -> dict[str, Any]:
     cleaned = _strip_fences(text)
     # Repair common LLM JSON mistakes: thousands-separator commas inside
-    # numbers (1,120,000 -> 1120000), trailing commas, stray double braces.
+    # numbers (1,120,000 -> 1120000), trailing commas, stray double braces,
+    # and invalid backslash escapes inside strings (\' and \" inside strings
+    # both mean what JSON's \" means; single backslash before non-JSON chars
+    # like apostrophes gets dropped).
     repaired = re.sub(r'(?<=[\d]),(?=[\d])', '', cleaned)
     repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
     repaired = re.sub(r'\{\{', '{', repaired)
     repaired = re.sub(r'\}\}', '}', repaired)
+    # Fix the most common invalid escape: \' inside strings (Python-style
+    # string literals leak into LLM output). Replace with a literal apostrophe.
+    repaired = re.sub(r"\\'", "'", repaired)
+    # Generic safety net: any \X where X is not a valid JSON escape char
+    # gets the backslash stripped. JSON allows only \" \\ \/ \b \f \n \r \t \uXXXX.
+    repaired = re.sub(r'\\([^"\\/bfnrtu])', r'\1', repaired)
     try:
         return _unwrap(json.loads(repaired))
     except json.JSONDecodeError:

@@ -119,10 +119,13 @@ def _parse_json(text: str) -> dict[str, Any]:
     #   1. Thousands-separator commas inside numbers: 1,120,000 -> 1120000
     #   2. Trailing commas before closing braces/brackets
     #   3. Stray markdown fence artifacts after stripping
+    #   4. Invalid backslash escapes (\' leaking from Python-style strings)
     repaired = re.sub(r'(?<=[\d]),(?=[\d])', '', cleaned)
     repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
     repaired = re.sub(r'\{\{', '{', repaired)
     repaired = re.sub(r'\}\}', '}', repaired)
+    repaired = re.sub(r"\\'", "'", repaired)
+    repaired = re.sub(r'\\([^"\\/bfnrtu])', r'\1', repaired)
     try:
         return json.loads(repaired)
     except json.JSONDecodeError:
