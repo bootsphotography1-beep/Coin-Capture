@@ -1,0 +1,48 @@
+# --- Runtime / data (regenerated on first run) ---
+data/coinscope.db
+data/photos/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+backend/.venv/
+.venv/
+*.egg-info/
+
+# --- Node / Android shell ---
+android-shell/node_modules/
+android-shell/www/assets/
+android-shell/android/.gradle/
+android-shell/android/build/
+android-shell/android/app/build/
+android-shell/android/app/release/
+android-shell/android/local.properties
+android-shell/android/captures/
+android-shell/android/.idea/
+android-shell/android/*.iml
+android-shell/android/app/src/main/assets/public/
+android-shell/android/app/src/main/assets/capacitor.config.json
+android-shell/android/app/src/main/assets/capacitor.plugins.json
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+npm-debug.log*
+
+# --- Local overrides ---
+.env
+.env.local
+*.local

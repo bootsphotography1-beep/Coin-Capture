@@ -1,0 +1,14 @@
+{
+  "appId": "app.coinscope.client",
+  "appName": "Coinscope",
+  "webDir": "www",
+  "server": {
+    "url": "http://10.0.2.2:8000",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  }
+}

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Coinscope — Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="dashboard-wrap">
+    <header class="dashboard-header">
+      <h1>COINSCOPE</h1>
+      <div class="dashboard-meta">
+        <div><strong id="meta-total">0</strong> scans</div>
+        <div><strong id="meta-ollama">…</strong> model</div>
+        <div><span id="meta-conn" class="connection-status">…</span></div>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search series, year, mint, rarity, notes…" />
+      <a class="btn" id="export-csv" href="/api/scans/export.csv">Export CSV</a>
+      <a class="btn" id="export-txt" href="/api/scans/export.txt">Export TXT</a>
+    </div>
+
+    <div id="grid" class="scan-grid"></div>
+    <div id="empty" class="empty-state">
+      <h2>No scans yet</h2>
+      <p>Open <code>/scan</code> on your phone (or <a id="scan-link" href="/scan">click here</a>) and scan a coin.</p>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN=*** URLSearchParams(location.search).get("token") || "coinscope-dev-token-change-me";
+    const photoUrl = (path) => `/api/photo?path=${encodeURIComponent(path)}&token=${encodeURIComponent(TOKEN)}`;
+    let allScans = [];
+    let displayedScans = [];
+
+    const grid = document.getElementById("grid");
+    const empty = document.getElementById("empty");
+    const metaTotal = document.getElementById("meta-total");
+    const metaOllama = document.getElementById("meta-ollama");
+    const metaConn = document.getElementById("meta-conn");
+    const search = document.getElementById("search");
+    const exportCsv = document.getElementById("export-csv");
+    const exportTxt = document.getElementById("export-txt");
+
+    // Set token on the export links so downloads work.
+    exportCsv.href = `/api/scans/export.csv?token=${encodeURIComponent(TOKEN)}`;
+    exportTxt.href = `/api/scans/export.txt?token=${encodeURIComponent(TOKEN)}`;
+
+    async function fetchHealth() {
+      try {
+        const r = await fetch("/api/health");
+        const h = await r.json();
+        metaOllama.textContent = h.model || "n/a";
+        metaConn.textContent = h.ollama ? "live" : "offline";
+        metaConn.className = "connection-status " + (h.ollama ? "ok" : "bad");
+      } catch (e) {
+        metaOllama.textContent = "?";
+        metaConn.textContent = "disconnected";
+        metaConn.className = "connection-status bad";
+      }
+    }
+
+    async function fetchScans() {
+      try {
+        const r = await fetch("/api/scans?limit=500", { headers: { "X-Coinscope-Token": TOKEN } });
+        const j = await r.json();
+        allScans = j.scans || [];
+        metaTotal.textContent = allScans.length;
+        applyFilter();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function photoSlot(scan) {
+      const f = scan.front_photo_path;
+      const r = scan.reverse_photo_path;
+      return (
+        '<div class="scan-photos">' +
+          '<div class="photo">' +
+            (f ? '<img src="' + photoUrl(f) + '" loading="lazy" />' : '<span class="empty">no front</span>') +
+            '<span class="label">Front</span>' +
+          '</div>' +
+          '<div class="photo">' +
+            (r ? '<img src="' + photoUrl(r) + '" loading="lazy" />' : '<span class="empty">no reverse</span>') +
+            '<span class="label">Reverse</span>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    function valueRange(rar) {
+      const lo = rar.estimated_value_low_usd;
+      const hi = rar.estimated_value_high_usd;
+      if (lo == null && hi == null) return "—";
+      if (lo == null) return "≤ $" + hi.toFixed(2);
+      if (hi == null) return "≥ $" + lo.toFixed(2);
+      return "$" + lo.toFixed(2) + " – $" + hi.toFixed(2);
+    }
+
+    function statusBlock(scan) {
+      if (scan.status === "complete") return "";
+      if (scan.status === "error") {
+        return '<div class="scan-error">⚠ ' + (scan.error || "unknown error") + '</div>';
+      }
+      const label = scan.status === "identifying" ? "Identifying coin…"
+                  : scan.status === "researching" ? "Researching rarity…"
+                  : scan.status === "uploading"   ? "Uploading…"
+                  : scan.status;
+      return '<div class="scan-status-line"><div class="spinner"></div>' + label + '</div>';
+    }
+
+    function conditionBlock(cond) {
+      if (!cond || !cond.band) return "";
+      const warnings = (cond.warnings || []).map(w => '<span class="condition-warning">' + escape(w) + '</span>').join(" ");
+      return (
+        '<div class="scan-stats">' +
+          '<div><div class="label">Condition</div><div class="value">' + escape(cond.band) + '</div></div>' +
+          '<div><div class="label">Score</div><div class="value">' + (cond.score != null ? cond.score + " / 100" : "—") +
+            ' <span style="color:var(--text-dim);font-weight:400;">(' + Math.round((cond.confidence || 0) * 100) + '% conf)</span>' +
+          '</div>' +
+        '</div>' +
+        (warnings ? '<div class="condition-warnings">' + warnings + '</div>' : '')
+      );
+    }
+
+    function comparablesBlock(comp) {
+      if (!comp) return "";
+      let parts = [];
+      if (comp.wiki_title && comp.wiki_url) {
+        parts.push('<a href="' + escape(comp.wiki_url) + '" target="_blank" rel="noopener">Wikipedia: ' + escape(comp.wiki_title) + '</a>');
+      }
+      if (comp.auction_comparable_sources && comp.auction_comparable_sources.length) {
+        parts.push('<div class="auction-sources">' +
+          comp.auction_comparable_sources.map(s =>
+            '<a href="' + escape(s.url) + '" target="_blank" rel="noopener">' + escape(s.name) + '</a>'
+          ).join(" · ") +
+        '</div>');
+      }
+      if (!parts.length) return "";
+      return '<div class="scan-notes" style="border-left-color:var(--info)"><strong>Sources:</strong> ' + parts.join("<br>") + '</div>';
+    }
+
+    function renderCard(scan) {
+      const ident = scan.identification || {};
+      const rar = scan.rarity || {};
+      const cond = scan.condition || {};
+      const comp = scan.comparables || {};
+      const title = rar.name || ident.series || "Identifying…";
+      const sub = [ident.country, ident.denomination, ident.year, ident.mint_mark && ("mint " + ident.mint_mark)]
+        .filter(Boolean).join(" · ") || "—";
+      return (
+        '<div class="scan-card" data-id="' + scan.id + '">' +
+          photoSlot(scan) +
+          '<div class="scan-body">' +
+            '<div class="scan-title">' + escape(title) + '</div>' +
+            '<div class="scan-subtitle">' + escape(sub) + '</div>' +
+            (rar.rarity_tier ? '<div class="scan-meta"><span class="rarity-tier ' + rar.rarity_tier + '">' + rar.rarity_tier + '</span>' + (rar.source === "canonical" ? '<span class="rarity-tier common" title="Matched our local reference DB">canonical</span>' : '') + '</div>' : '') +
+            (rar.mintage || rar.estimated_value_low_usd != null ? (
+              '<div class="scan-stats">' +
+                (rar.mintage ? '<div><div class="label">Mintage</div><div class="value">' + Number(rar.mintage).toLocaleString() + '</div></div>' : '') +
+                '<div><div class="label">Est. value</div><div class="value">' + valueRange(rar) + '</div></div>' +
+              '</div>'
+            ) : '') +
+            conditionBlock(cond) +
+            (rar.scarcity_note ? '<div class="scan-notes">' + escape(rar.scarcity_note) + '</div>' : '') +
+            (rar.value_note ? '<div class="scan-notes" style="border-left-color:var(--info)">' + escape(rar.value_note) + '</div>' : '') +
+            comparablesBlock(comp) +
+            statusBlock(scan) +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    function escape(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    function applyFilter() {
+      const q = (search.value || "").trim().toLowerCase();
+      if (!q) {
+        displayedScans = allScans;
+      } else {
+        displayedScans = allScans.filter(s => {
+          const ident = s.identification || {};
+          const rar = s.rarity || {};
+          const cond = s.condition || {};
+          const hay = [
+            ident.country, ident.denomination, ident.series, ident.year,
+            ident.mint_mark, rar.name, rar.rarity_tier, cond.band, s.notes,
+            s.group_id
+          ].filter(Boolean).join(" ").toLowerCase();
+          return hay.includes(q);
+        });
+      }
+      render();
+    }
+
+    function render() {
+      if (!displayedScans.length) {
+        grid.innerHTML = "";
+        empty.style.display = "block";
+        empty.querySelector("h2").textContent = allScans.length === 0
+          ? "No scans yet"
+          : "No matches for \"" + (search.value || "") + "\"";
+        return;
+      }
+      empty.style.display = "none";
+      grid.innerHTML = displayedScans.map(renderCard).join("");
+    }
+
+    search.addEventListener("input", applyFilter);
+
+    // Live WebSocket updates.
+    let ws = null;
+    function connectWs() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+      ws.onopen = () => { metaConn.textContent = "live"; metaConn.className = "connection-status ok"; };
+      ws.onclose = () => {
+        metaConn.textContent = "reconnecting…";
+        metaConn.className = "connection-status bad";
+        setTimeout(connectWs, 2000);
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const e = JSON.parse(ev.data);
+          if (e.type === "hello" && Array.isArray(e.scans)) {
+            allScans = e.scans;
+            metaTotal.textContent = allScans.length;
+            applyFilter();
+          } else if (e.type && e.type.startsWith("scan.")) {
+            fetchScans();
+          }
+        } catch (err) { console.error(err); }
+      };
+    }
+
+    fetchHealth();
+    fetchScans();
+    connectWs();
+    setInterval(fetchHealth, 15000);
+  </script>
+</body>
+</html>

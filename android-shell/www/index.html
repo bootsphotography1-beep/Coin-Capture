@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="format-detection" content="telephone=no" />
+  <meta name="theme-color" content="#0d0f12" />
+  <title>Coinscope</title>
+  <style>
+    body { margin: 0; background: #0d0f12; color: #e8eaee; font-family: -apple-system, sans-serif;
+           display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .loader { text-align: center; }
+    .spinner { width: 36px; height: 36px; border: 3px solid #2a313d; border-top-color: #d4a55a;
+               border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { color: #9aa3b0; font-size: 14px; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="loader">
+    <div class="spinner"></div>
+    <p>Connecting to Coinscope…</p>
+  </div>
+  <script>
+    // The app's real home is the scanner page on the Mac. When the Mac isn't
+    // reachable, this loader stays put so the user has visual feedback.
+    const target = "/scan";
+    setTimeout(() => { location.href = target; }, 800);
+  </script>
+</body>
+</html>

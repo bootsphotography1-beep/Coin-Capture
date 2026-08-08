@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Coinscope — Scanner</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="scanner-wrap">
+    <header class="scanner-header">
+      <h1>COINSCOPE</h1>
+      <div id="conn" class="connection-status">Connecting…</div>
+    </header>
+
+    <div class="camera-frame">
+      <video id="cam" playsinline autoplay muted></video>
+      <canvas id="frame"></canvas>
+      <div id="overlay" class="detection-overlay"></div>
+    </div>
+
+    <div class="scanner-controls">
+      <button id="toggle-cam" class="btn">Start camera</button>
+      <button id="capture" class="btn primary capture" disabled>Capture</button>
+    </div>
+
+    <div id="status" class="status-line">Press Start camera to begin.</div>
+
+    <section class="scan-queue">
+      <h2>Recent scans</h2>
+      <div id="queue"></div>
+    </section>
+  </div>
+
+  <script>
+    /* ==== Configuration ==== */
+    const TOKEN = new URLSearchParams(location.search).get("token") || "coinscope-dev-token-change-me";
+
+    /* ==== State ==== */
+    let stream = null;
+    let camRunning = false;
+    let groupId = null;          // groups obverse + reverse of one coin
+    let currentSide = 1;         // 1 = obverse (front), 2 = reverse
+    let lastDetectionTs = 0;
+    let detectionStable = 0;     // consecutive frames with a coin detected
+    let autoMode = true;
+    let scanning = false;
+
+    /* ==== DOM ==== */
+    const $ = id => document.getElementById(id);
+    const video = $("cam"), canvas = $("frame"), overlay = $("overlay");
+    const status = $("status"), queue = $("queue"), conn = $("conn");
+    const btnCam = $("toggle-cam"), btnCap = $("capture");
+
+    /* ==== Health check on load ==== */
+    async function checkHealth() {
+      try {
+        const r = await fetch("/api/health");
+        const h = await r.json();
+        if (h.ok) {
+          conn.textContent = h.ollama ? "Connected · " + h.model : "Connected (model offline)";
+          conn.className = "connection-status " + (h.ollama ? "ok" : "bad");
+        } else {
+          throw new Error("not ok");
+        }
+      } catch (e) {
+        conn.textContent = "Cannot reach Mac";
+        conn.className = "connection-status bad";
+      }
+    }
+
+    /* ==== Camera control ==== */
+    async function startCamera() {
+      try {
+        status.textContent = "Requesting camera permission…";
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1920 },
+          },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        camRunning = true;
+        btnCam.textContent = "Stop camera";
+        btnCap.disabled = false;
+        status.textContent = "Camera live. Hold a coin in the dashed circle.";
+        // Start the detection loop.
+        requestAnimationFrame(detectionLoop);
+      } catch (e) {
+        status.textContent = "Camera error: " + e.message;
+        conn.className = "connection-status bad";
+      }
+    }
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      camRunning = false;
+      btnCam.textContent = "Start camera";
+      btnCap.disabled = true;
+      status.textContent = "Camera off.";
+    }
+
+    btnCam.onclick = () => camRunning ? stopCamera() : startCamera();
+    btnCap.onclick = () => { autoMode = false; captureNow(); };
+
+    /* ==== Coin detection (client-side, lightweight) ====
+       Runs on a downscaled grayscale frame. A coin is a roughly circular
+       bright region against a darker background. We use Otsu-style threshold
+       + connected-component ratio-of-area-to-perimeter to estimate circularity.
+       Cheap enough to run at ~10 fps on a phone. */
+    const DETECT_W = 240;
+    let detectBuf = null;
+    let detectData = null;
+
+    function setupDetectCanvas() {
+      const w = DETECT_W, h = DETECT_W;
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      detectBuf = ctx.createImageData(w, h);
+      detectData = detectBuf.data;
+      return ctx;
+    }
+
+    function detectLoop() {
+      if (!camRunning) return;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, DETECT_W, DETECT_W);
+      const frame = ctx.getImageData(0, 0, DETECT_W, DETECT_W);
+      const d = frame.data;
+
+      // 1. Convert to grayscale + compute mean (for adaptive threshold).
+      const px = DETECT_W * DETECT_W;
+      const gray = new Uint8Array(px);
+      let mean = 0;
+      for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+        const v = (d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114) | 0;
+        gray[j] = v;
+        mean += v;
+      }
+      mean /= px;
+
+      // 2. Threshold: bright pixels are coin candidates.
+      const thr = Math.min(255, mean * 1.2 + 30);
+      let sumX = 0, sumY = 0, count = 0;
+      for (let y = 0; y < DETECT_W; y++) {
+        for (let x = 0; x < DETECT_W; x++) {
+          if (gray[y * DETECT_W + x] > thr) {
+            sumX += x; sumY += y; count++;
+          }
+        }
+      }
+
+      let score = 0;
+      if (count > 200) {
+        const cx = sumX / count, cy = sumY / count;
+        // 3. Distance-variance from centroid (lower = more circular blob).
+        let varSum = 0;
+        for (let y = 0; y < DETECT_W; y++) {
+          for (let x = 0; x < DETECT_W; x++) {
+            if (gray[y * DETECT_W + x] > thr) {
+              const dx = x - cx, dy = y - cy;
+              varSum += dx * dx + dy * dy;
+            }
+          }
+        }
+        const variance = varSum / count;
+        // Expected variance for a filled circle of radius r is r^2/2.
+        // So a circle-ness score: ratio of (count) to (area of enclosing circle).
+        const r = Math.sqrt(count / Math.PI);
+        const enclosingArea = Math.PI * Math.max(r * 2, 1) ** 2;
+        const fillRatio = count / enclosingArea;
+        // Penalize very low fill (scattered highlights) and very high (no shape).
+        score = fillRatio * (1 - Math.min(1, variance / (r * r * 2)));
+        // Need at least ~5% of the frame to count.
+        score *= Math.min(1, count / (DETECT_W * DETECT_W * 0.05));
+      }
+
+      const isCoin = score > 0.45 && count > 1500;
+      if (isCoin) {
+        detectionStable++;
+        overlay.classList.add("locked");
+        if (detectionStable > 6 && autoMode && Date.now() - lastDetectionTs > 3000 && !scanning) {
+          lastDetectionTs = Date.now();
+          captureNow();
+        }
+      } else {
+        detectionStable = Math.max(0, detectionStable - 1);
+        overlay.classList.remove("locked");
+      }
+      // Visual feedback on the circle overlay color
+      overlay.style.borderColor = isCoin ? "var(--good)" : "var(--accent)";
+
+      requestAnimationFrame(detectLoop);
+    }
+
+    /* ==== Capture & upload ==== */
+    async function captureNow() {
+      if (scanning) return;
+      scanning = true;
+      const side = currentSide === 1 ? "obverse" : "reverse";
+      status.textContent = "Capturing " + side + "…";
+      status.classList.add("active");
+
+      // Grab a fresh high-res still from the video.
+      const cap = document.createElement("canvas");
+      cap.width = video.videoWidth || 1280;
+      cap.height = video.videoHeight || 1280;
+      const cctx = cap.getContext("2d");
+      cctx.drawImage(video, 0, 0, cap.width, cap.height);
+      const blob = await new Promise(res => cap.toBlob(res, "image/jpeg", 0.9));
+
+      // First time through, mint a group id for this physical coin.
+      if (currentSide === 1) {
+        groupId = "g_" + Math.random().toString(36).slice(2, 10);
+      }
+
+      const fd = new FormData();
+      fd.append("image", blob, side + ".jpg");
+      fd.append("side", side);
+      fd.append("side_index", currentSide);
+      fd.append("group_id", groupId);
+
+      try {
+        const r = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "X-Coinscope-Token": TOKEN },
+          body: fd,
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || "upload failed");
+
+        status.textContent = currentSide === 1
+          ? "Front sent (scan #" + j.scan_id + "). Flip the coin over for the reverse."
+          : "Reverse sent. Both sides uploaded. Ready for the next coin.";
+
+        addQueueRow(j.scan_id, currentSide === 1 ? "obverse" : "reverse");
+
+        if (currentSide === 1) {
+          currentSide = 2;
+        } else {
+          // Done with this coin — reset for next.
+          currentSide = 1;
+          groupId = null;
+          setTimeout(() => { status.textContent = "Camera live. Hold the next coin in the circle."; }, 2500);
+        }
+      } catch (e) {
+        status.textContent = "Upload error: " + e.message;
+      } finally {
+        scanning = false;
+        status.classList.remove("active");
+      }
+    }
+
+    function addQueueRow(scanId, side) {
+      const row = document.createElement("div");
+      row.className = "queue-row";
+      row.id = "q_" + scanId;
+      row.innerHTML =
+        '<span style="font-family:var(--mono);color:var(--text-dim);">#' + scanId + '</span>' +
+        '<span class="badge uploading">' + side + '</span>' +
+        '<span style="color:var(--text-dim);">uploading…</span>';
+      queue.prepend(row);
+    }
+
+    /* ==== Live updates: short-poll the scan list every 2s while camera is on ==== */
+    let pollTimer = null;
+    async function pollScans() {
+      try {
+        const r = await fetch("/api/scans?limit=10", { headers: { "X-Coinscope-Token": TOKEN } });
+        const j = await r.json();
+        for (const s of j.scans) {
+          const row = document.getElementById("q_" + s.id);
+          if (row) {
+            const badge = row.querySelector(".badge");
+            badge.className = "badge " + s.status;
+            badge.textContent = s.status;
+            const last = row.lastElementChild;
+            if (s.status === "complete") {
+              const ident = s.identification || {};
+              const rar = s.rarity || {};
+              last.textContent = (ident.series || "Coin") + " · " + (rar.rarity_tier || "?");
+            } else if (s.status === "error") {
+              last.textContent = "error: " + (s.error || "");
+              last.style.color = "var(--bad)";
+            } else {
+              last.textContent = s.status + "…";
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    camRunning = false;
+    setupDetectCanvas();
+    checkHealth();
+    pollTimer = setInterval(pollScans, 2000);
+    pollScans();
+  </script>
+</body>
+</html>
