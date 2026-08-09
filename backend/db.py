@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from typing import Iterator, Any
 
-import config
+from . import config
 
 _local = threading.local()
 
@@ -92,6 +92,21 @@ def set_photo_paths(scan_id: int, front: str | None, reverse: str | None) -> Non
                WHERE id = ?""",
             (front, reverse, time.time(), scan_id),
         )
+
+
+def has_recent_front_upload(group_id: str, within_seconds: int = 3) -> bool:
+    """Has a front photo already been uploaded for this group within the
+    last N seconds? Used to reject the auto-capture firing twice for the
+    same coin in rapid succession (network race, double-tap, jitter)."""
+    cutoff = time.time() - within_seconds
+    with tx() as c:
+        row = c.execute(
+            """SELECT 1 FROM scans
+               WHERE group_id=? AND side='obverse' AND created_at >= ?
+               LIMIT 1""",
+            (group_id, cutoff),
+        ).fetchone()
+    return row is not None
 
 
 def set_status(scan_id: int, status: str, error: str | None = None) -> None:

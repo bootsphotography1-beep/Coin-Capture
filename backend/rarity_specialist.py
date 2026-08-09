@@ -26,7 +26,7 @@ import time
 from typing import Any
 import httpx
 
-import config
+from . import config
 
 log = logging.getLogger("coinscope.rarity_specialist")
 

@@ -15,13 +15,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 import weakref
 
-import config
-import db
-import ollama_client
-import rarity
-import rarity_specialist
-import condition
-import comparables
+from . import config
+from . import db
+from . import ollama_client
+from . import rarity
+from . import rarity_specialist
+from . import condition
+from . import comparables
 
 log = logging.getLogger("coinscope.jobs")
 

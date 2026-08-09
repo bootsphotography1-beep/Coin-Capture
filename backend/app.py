@@ -22,11 +22,11 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-import config
-import db
-import jobs
-import ollama_client
-from canonical import export_canonical
+from . import config
+from . import db
+from . import jobs
+from . import ollama_client
+from .canonical import export_canonical
 
 logging.basicConfig(
     level=os.environ.get("COINSCOPE_LOG_LEVEL", "INFO"),
@@ -110,8 +110,19 @@ async def upload_photo(
     image: UploadFile = File(...),
 ) -> JSONResponse:
     _check_token(request)
+
+    # First time through, mint a group id for this physical coin.
     if not group_id:
         group_id = jobs.new_group_id()
+
+    # Enforce: only one front-photo upload per group_id within 3 seconds.
+    # This catches the auto-capture firing twice for the same coin
+    # (network race, double-tap on the manual button, brief stability flicker).
+    if side == "obverse" and db.has_recent_front_upload(group_id, within_seconds=3):
+        raise HTTPException(
+            status_code=409,
+            detail="Front photo already uploaded for this coin — wait 3s before next capture",
+        )
 
     # Read + validate the image. Reject anything we can't decode.
     image_bytes = await image.read()
