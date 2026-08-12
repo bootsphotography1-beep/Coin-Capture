@@ -322,6 +322,88 @@ _US_COINS: list[dict[str, Any]] = [
         "common_value_low": 1.0,
         "common_value_high": 30.0,
     },
+    # --- Lincoln Shield Cent (2010-present) ---
+    {
+        "key": ("lincolnshieldcent", None),
+        "name": "Lincoln Shield Cent",
+        "series": "Lincoln Shield Cent",
+        "year": None,
+        "mintage": 4000000000,
+        "rarity_tier": "common",
+        "scarcity_note": "Current circulating cent. Face value in typical grades.",
+        "common_value_low": 0.01,
+        "common_value_high": 0.50,
+    },
+    # --- 1943 steel cent ---
+    {
+        "key": ("lincolnwheatcent", "1943"),
+        "name": "1943 Lincoln Wheat Cent (steel)",
+        "series": "Lincoln Wheat Cent",
+        "year": "1943",
+        "mintage": 1000000000,
+        "rarity_tier": "common",
+        "scarcity_note": "Zinc-coated steel wartime cent. Common; copper 1943 off-metal errors are extremely rare and need authentication.",
+        "common_value_low": 0.10,
+        "common_value_high": 5.0,
+    },
+    # --- War nickel ---
+    {
+        "key": ("jeffersonnickel", "1943"),
+        "name": "1943 Jefferson War Nickel",
+        "series": "Jefferson Nickel",
+        "year": "1943",
+        "mintage": 271165000,
+        "rarity_tier": "common",
+        "scarcity_note": "35% silver wartime nickel (1942-1945, large mint mark on reverse). Modest silver + numismatic premium.",
+        "common_value_low": 1.0,
+        "common_value_high": 8.0,
+    },
+    {
+        "key": ("jeffersonnickel", "1944"),
+        "name": "1944 Jefferson War Nickel",
+        "series": "Jefferson Nickel",
+        "year": "1944",
+        "mintage": 173099000,
+        "rarity_tier": "common",
+        "scarcity_note": "35% silver wartime nickel.",
+        "common_value_low": 1.0,
+        "common_value_high": 8.0,
+    },
+    {
+        "key": ("jeffersonnickel", "1945"),
+        "name": "1945 Jefferson War Nickel",
+        "series": "Jefferson Nickel",
+        "year": "1945",
+        "mintage": 189913000,
+        "rarity_tier": "common",
+        "scarcity_note": "35% silver wartime nickel. Last year of the silver alloy.",
+        "common_value_low": 1.0,
+        "common_value_high": 8.0,
+    },
+    # --- Sacagawea / Native American Dollar ---
+    {
+        "key": ("sacagaweadollar", None),
+        "name": "Sacagawea / Native American Dollar",
+        "series": "Sacagawea Dollar",
+        "year": None,
+        "mintage": 1000000000,
+        "rarity_tier": "common",
+        "scarcity_note": "Manganese-brass dollar. Common in circulation and mint rolls.",
+        "common_value_low": 1.0,
+        "common_value_high": 5.0,
+    },
+    # --- Presidential Dollar ---
+    {
+        "key": ("presidentialdollar", None),
+        "name": "Presidential Dollar",
+        "series": "Presidential Dollar",
+        "year": None,
+        "mintage": 300000000,
+        "rarity_tier": "common",
+        "scarcity_note": "Common. Missing-edge-lettering errors exist and need a specialist.",
+        "common_value_low": 1.0,
+        "common_value_high": 8.0,
+    },
     # --- Susan B Anthony Dollar (1979-1981, 1999) ---
     {
         "key": ("susanbanthonydollar", None),
@@ -360,6 +442,10 @@ _SERIES_ALIASES: dict[str, str] = {
     "mercdime": "mercurydime",
     "washingtonquarter": "washingtonquarter",
     "washington": "washingtonquarter",
+    "washingtonstatequarter": "washingtonquarter",
+    "statequarter": "washingtonquarter",
+    "americathebeautifulquarter": "washingtonquarter",
+    "atbquarter": "washingtonquarter",
     "walkinglibertyhalf": "walkinglibertyhalf",
     "walkingliberty": "walkinglibertyhalf",
     "walkerlady": "walkinglibertyhalf",
@@ -375,6 +461,17 @@ _SERIES_ALIASES: dict[str, str] = {
     "susanbanthonydollar": "susanbanthonydollar",
     "susanbanthony": "susanbanthonydollar",
     "sba": "susanbanthonydollar",
+    "lincolnshieldcent": "lincolnshieldcent",
+    "lincolnshield": "lincolnshieldcent",
+    "shieldcent": "lincolnshieldcent",
+    "unionshieldcent": "lincolnshieldcent",
+    "sacagaweadollar": "sacagaweadollar",
+    "sacagawea": "sacagaweadollar",
+    "nativeamericandollar": "sacagaweadollar",
+    "golden dollar": "sacagaweadollar",
+    "goldendollar": "sacagaweadollar",
+    "presidentialdollar": "presidentialdollar",
+    "presidential": "presidentialdollar",
 }
 
 
@@ -384,6 +481,34 @@ def _series_key(series: str | None) -> str | None:
     return _SERIES_ALIASES.get(_normalize(series))
 
 
+def _series_from_denomination(identification: dict) -> str | None:
+    """When the model names the denomination but not a series we know."""
+    denom = _normalize(identification.get("denomination") or "")
+    year_s = str(identification.get("year") or "").strip()
+    year_i = int(year_s) if year_s.isdigit() else 0
+    if denom in ("onecent", "cent", "penny", "1cent"):
+        if year_i and year_i <= 1958:
+            return "lincolnwheatcent"
+        if year_i and year_i <= 2008:
+            return "lincolnmemorialcent"
+        return "lincolnshieldcent"
+    if denom in ("fivecents", "nickel", "5cents"):
+        return "jeffersonnickel"
+    if denom in ("dime", "tendcents", "10cents"):
+        return "rooseveltdime" if (not year_i or year_i >= 1946) else "mercurydime"
+    if denom in ("quarter", "quarterdollar", "25cents"):
+        return "washingtonquarter"
+    if denom in ("halfdollar", "half", "50cents"):
+        return "kennedyhalf" if (not year_i or year_i >= 1964) else "walkinglibertyhalf"
+    if denom in ("dollar", "onedollar"):
+        if year_i and 1971 <= year_i <= 1978:
+            return "eisenhowardollar"
+        if year_i and year_i in (1979, 1980, 1981, 1999):
+            return "susanbanthonydollar"
+        return "sacagaweadollar"
+    return None
+
+
 def lookup_canonical(identification: dict) -> dict | None:
     """Try to find a canonical entry matching this LLM identification.
     Returns the rarity dict (with name, mintage, scarcity_note, value range) or None.
@@ -391,7 +516,7 @@ def lookup_canonical(identification: dict) -> dict | None:
     """
     series = identification.get("series") or identification.get("denomination") or ""
     year = str(identification.get("year") or "").strip()
-    sk = _series_key(series)
+    sk = _series_key(series) or _series_from_denomination(identification)
     if not sk:
         return None
     # Try exact year match first
@@ -403,6 +528,18 @@ def lookup_canonical(identification: dict) -> dict | None:
         if entry["key"][0] == sk and entry["key"][1] is None:
             return _entry_to_report(entry)
     return None
+
+
+def rarity_flag(tier: str | None) -> str:
+    """coarse badge: rare | notable | common | unknown"""
+    t = (tier or "").lower().strip()
+    if t in ("key", "rare"):
+        return "rare"
+    if t in ("semi-key", "semikey", "semi_key"):
+        return "notable"
+    if t == "common":
+        return "common"
+    return "unknown"
 
 
 def _entry_to_report(entry: dict) -> dict:

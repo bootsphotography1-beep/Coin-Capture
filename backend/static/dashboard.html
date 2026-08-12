@@ -7,72 +7,112 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <div id="wizard" class="wizard">
+    <div class="wizard-card">
+      <div class="steps" id="wiz-step-label">Step 1 of 4</div>
+      <h1>COINSCOPE</h1>
+      <div id="wiz-body"></div>
+      <p class="wizard-error" id="wiz-err"></p>
+      <div class="sheet-actions" id="wiz-actions"></div>
+    </div>
+  </div>
+
   <div class="dashboard-wrap">
     <header class="dashboard-header">
-      <h1>COINSCOPE</h1>
+      <div>
+        <h1>COINSCOPE</h1>
+        <p class="tagline">US pocket change · cropped coins · collections by year</p>
+      </div>
       <div class="dashboard-meta">
-        <div><strong id="meta-total">0</strong> scans</div>
-        <div><strong id="meta-ollama">…</strong> model</div>
+        <div><strong id="meta-total">0</strong> coins</div>
+        <div><strong id="meta-ollama">…</strong></div>
         <div><span id="meta-conn" class="connection-status">…</span></div>
+        <button class="btn ghost" id="btn-setup" type="button">Setup</button>
       </div>
     </header>
 
     <div class="toolbar">
-      <input id="search" type="search" placeholder="Search series, year, mint, rarity, notes…" />
+      <input id="search" type="search" placeholder="Search series, year, mint, rarity…" />
       <a class="btn" id="export-csv" href="/api/scans/export.csv">Export CSV</a>
       <a class="btn" id="export-txt" href="/api/scans/export.txt">Export TXT</a>
     </div>
 
-    <div id="grid" class="scan-grid"></div>
+    <div id="year-rail" class="year-rail"></div>
+    <div id="collections"></div>
     <div id="empty" class="empty-state">
-      <h2>No scans yet</h2>
-      <p>Open <code>/scan</code> on your phone (or <a id="scan-link" href="/scan">click here</a>) and scan a coin.</p>
+      <h2>No coins yet</h2>
+      <p>On the phone, open Coinscope, enter this Mac’s IP, and scan. Results land here in a year collection.</p>
     </div>
   </div>
 
   <script>
-    const TOKEN=*** URLSearchParams(location.search).get("token") || "coinscope-dev-token-change-me";
+    const TOKEN = new URLSearchParams(location.search).get("token") || "coinscope-dev-token-change-me";
     const photoUrl = (path) => `/api/photo?path=${encodeURIComponent(path)}&token=${encodeURIComponent(TOKEN)}`;
-    let allScans = [];
-    let displayedScans = [];
+    const headers = { "X-Coinscope-Token": TOKEN, "Content-Type": "application/json" };
 
-    const grid = document.getElementById("grid");
+    let allScans = [];
+    let activeYear = "all";
+    let wiz = { step: 1, mode: "two-computer", ollama_host: "", ollama_port: 11434 };
+
+    const collectionsEl = document.getElementById("collections");
     const empty = document.getElementById("empty");
     const metaTotal = document.getElementById("meta-total");
     const metaOllama = document.getElementById("meta-ollama");
     const metaConn = document.getElementById("meta-conn");
     const search = document.getElementById("search");
-    const exportCsv = document.getElementById("export-csv");
-    const exportTxt = document.getElementById("export-txt");
+    const yearRail = document.getElementById("year-rail");
+    document.getElementById("export-csv").href = `/api/scans/export.csv?token=${encodeURIComponent(TOKEN)}`;
+    document.getElementById("export-txt").href = `/api/scans/export.txt?token=${encodeURIComponent(TOKEN)}`;
+    document.getElementById("btn-setup").onclick = () => openWizard(true);
 
-    // Set token on the export links so downloads work.
-    exportCsv.href = `/api/scans/export.csv?token=${encodeURIComponent(TOKEN)}`;
-    exportTxt.href = `/api/scans/export.txt?token=${encodeURIComponent(TOKEN)}`;
+    function escape(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[c]));
+    }
 
     async function fetchHealth() {
       try {
         const r = await fetch("/api/health");
         const h = await r.json();
-        metaOllama.textContent = h.model || "n/a";
-        metaConn.textContent = h.ollama ? "live" : "offline";
+        metaOllama.textContent = (h.model || "n/a") + (h.ollama ? "" : " · offline");
+        metaConn.textContent = h.ollama ? "model live" : "model offline";
         metaConn.className = "connection-status " + (h.ollama ? "ok" : "bad");
+        return h;
       } catch (e) {
         metaOllama.textContent = "?";
         metaConn.textContent = "disconnected";
         metaConn.className = "connection-status bad";
+        return null;
       }
     }
 
     async function fetchScans() {
       try {
-        const r = await fetch("/api/scans?limit=500", { headers: { "X-Coinscope-Token": TOKEN } });
+        const r = await fetch("/api/scans?limit=2000", { headers: { "X-Coinscope-Token": TOKEN } });
         const j = await r.json();
         allScans = j.scans || [];
         metaTotal.textContent = allScans.length;
-        applyFilter();
+        render();
       } catch (e) {
         console.error(e);
       }
+    }
+
+    function valueRange(rar) {
+      const lo = rar.estimated_value_low_usd;
+      const hi = rar.estimated_value_high_usd;
+      if (lo == null && hi == null) return "—";
+      if (lo == null) return "≤ $" + Number(hi).toFixed(2);
+      if (hi == null) return "≥ $" + Number(lo).toFixed(2);
+      return "$" + Number(lo).toFixed(2) + " – $" + Number(hi).toFixed(2);
+    }
+
+    function flagLabel(flag) {
+      if (flag === "rare") return "Rare";
+      if (flag === "notable") return "Notable";
+      if (flag === "common") return "Common";
+      return "Unknown";
     }
 
     function photoSlot(scan) {
@@ -81,150 +121,115 @@
       return (
         '<div class="scan-photos">' +
           '<div class="photo">' +
-            (f ? '<img src="' + photoUrl(f) + '" loading="lazy" />' : '<span class="empty">no front</span>') +
+            (f ? '<img src="' + photoUrl(f) + '" alt="obverse" />' : '<span class="empty">no front</span>') +
             '<span class="label">Front</span>' +
           '</div>' +
           '<div class="photo">' +
-            (r ? '<img src="' + photoUrl(r) + '" loading="lazy" />' : '<span class="empty">no reverse</span>') +
+            (r ? '<img src="' + photoUrl(r) + '" alt="reverse" />' : '<span class="empty">no reverse</span>') +
             '<span class="label">Reverse</span>' +
           '</div>' +
         '</div>'
       );
     }
 
-    function valueRange(rar) {
-      const lo = rar.estimated_value_low_usd;
-      const hi = rar.estimated_value_high_usd;
-      if (lo == null && hi == null) return "—";
-      if (lo == null) return "≤ $" + hi.toFixed(2);
-      if (hi == null) return "≥ $" + lo.toFixed(2);
-      return "$" + lo.toFixed(2) + " – $" + hi.toFixed(2);
-    }
-
-    function statusBlock(scan) {
-      if (scan.status === "complete") return "";
-      if (scan.status === "error") {
-        return '<div class="scan-error">⚠ ' + (scan.error || "unknown error") + '</div>';
-      }
-      const label = scan.status === "identifying" ? "Identifying coin…"
-                  : scan.status === "researching" ? "Researching rarity…"
-                  : scan.status === "uploading"   ? "Uploading…"
-                  : scan.status;
-      return '<div class="scan-status-line"><div class="spinner"></div>' + label + '</div>';
-    }
-
-    function conditionBlock(cond) {
-      if (!cond || !cond.band) return "";
-      const warnings = (cond.warnings || []).map(w => '<span class="condition-warning">' + escape(w) + '</span>').join(" ");
-      return (
-        '<div class="scan-stats">' +
-          '<div><div class="label">Condition</div><div class="value">' + escape(cond.band) + '</div></div>' +
-          '<div><div class="label">Score</div><div class="value">' + (cond.score != null ? cond.score + " / 100" : "—") +
-            ' <span style="color:var(--text-dim);font-weight:400;">(' + Math.round((cond.confidence || 0) * 100) + '% conf)</span>' +
-          '</div>' +
-        '</div>' +
-        (warnings ? '<div class="condition-warnings">' + warnings + '</div>' : '')
-      );
-    }
-
-    function comparablesBlock(comp) {
-      if (!comp) return "";
-      let parts = [];
-      if (comp.wiki_title && comp.wiki_url) {
-        parts.push('<a href="' + escape(comp.wiki_url) + '" target="_blank" rel="noopener">Wikipedia: ' + escape(comp.wiki_title) + '</a>');
-      }
-      if (comp.auction_comparable_sources && comp.auction_comparable_sources.length) {
-        parts.push('<div class="auction-sources">' +
-          comp.auction_comparable_sources.map(s =>
-            '<a href="' + escape(s.url) + '" target="_blank" rel="noopener">' + escape(s.name) + '</a>'
-          ).join(" · ") +
-        '</div>');
-      }
-      if (!parts.length) return "";
-      return '<div class="scan-notes" style="border-left-color:var(--info)"><strong>Sources:</strong> ' + parts.join("<br>") + '</div>';
-    }
-
     function renderCard(scan) {
       const ident = scan.identification || {};
       const rar = scan.rarity || {};
       const cond = scan.condition || {};
-      const comp = scan.comparables || {};
+      const flag = scan.rarity_flag || rar.flag || "unknown";
       const title = rar.name || ident.series || "Identifying…";
-      const sub = [ident.country, ident.denomination, ident.year, ident.mint_mark && ("mint " + ident.mint_mark)]
+      const sub = [ident.denomination, ident.year, ident.mint_mark && ("mint " + ident.mint_mark)]
         .filter(Boolean).join(" · ") || "—";
+      const elapsed = rar.elapsed_s != null ? '<span style="color:var(--text-dim);font-size:11px">' + rar.elapsed_s + "s</span>" : "";
+      let status = "";
+      if (scan.status === "error") {
+        status = '<div class="scan-error">⚠ ' + escape(scan.error || "error") + "</div>";
+      } else if (scan.status !== "complete") {
+        const label = scan.status === "identifying" ? "Reading coin…"
+                    : scan.status === "researching" ? "Checking rarity…"
+                    : "In queue…";
+        status = '<div class="scan-status-line"><div class="spinner"></div>' + label + "</div>";
+      }
       return (
         '<div class="scan-card" data-id="' + scan.id + '">' +
           photoSlot(scan) +
           '<div class="scan-body">' +
-            '<div class="scan-title">' + escape(title) + '</div>' +
-            '<div class="scan-subtitle">' + escape(sub) + '</div>' +
-            (rar.rarity_tier ? '<div class="scan-meta"><span class="rarity-tier ' + rar.rarity_tier + '">' + rar.rarity_tier + '</span>' + (rar.source === "canonical" ? '<span class="rarity-tier common" title="Matched our local reference DB">canonical</span>' : '') + '</div>' : '') +
-            (rar.mintage || rar.estimated_value_low_usd != null ? (
-              '<div class="scan-stats">' +
-                (rar.mintage ? '<div><div class="label">Mintage</div><div class="value">' + Number(rar.mintage).toLocaleString() + '</div></div>' : '') +
-                '<div><div class="label">Est. value</div><div class="value">' + valueRange(rar) + '</div></div>' +
-              '</div>'
-            ) : '') +
-            conditionBlock(cond) +
-            (rar.scarcity_note ? '<div class="scan-notes">' + escape(rar.scarcity_note) + '</div>' : '') +
-            (rar.value_note ? '<div class="scan-notes" style="border-left-color:var(--info)">' + escape(rar.value_note) + '</div>' : '') +
-            comparablesBlock(comp) +
-            statusBlock(scan) +
-          '</div>' +
-        '</div>'
+            '<div class="scan-title">' + escape(title) + "</div>" +
+            '<div class="scan-subtitle">' + escape(sub) + "</div>" +
+            '<div class="scan-meta">' +
+              '<span class="flag-badge ' + flag + '">' + flagLabel(flag) + "</span>" +
+              (rar.rarity_tier ? '<span class="rarity-tier ' + escape(rar.rarity_tier) + '">' + escape(rar.rarity_tier) + "</span>" : "") +
+              elapsed +
+            "</div>" +
+            '<div class="scan-stats">' +
+              '<div><div class="label">Est. value</div><div class="value">' + valueRange(rar) + "</div></div>" +
+              '<div><div class="label">Condition</div><div class="value">' + escape(cond.band || "—") + "</div></div>" +
+            "</div>" +
+            (rar.scarcity_note ? '<div class="scan-notes">' + escape(rar.scarcity_note) + "</div>" : "") +
+            status +
+          "</div>" +
+        "</div>"
       );
     }
 
-    function escape(s) {
-      return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
-        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-      }[c]));
+    function groupByYear(scans) {
+      const groups = {};
+      for (const s of scans) {
+        const y = s.collection_year || (s.identification && s.identification.year) || "Unknown";
+        const key = (String(y).match(/^\d{4}$/) ? String(y) : "Unknown");
+        (groups[key] || (groups[key] = [])).push(s);
+      }
+      const years = Object.keys(groups).filter(y => y !== "Unknown").sort((a,b) => b - a);
+      if (groups.Unknown) years.push("Unknown");
+      return { years, groups };
     }
 
-    function applyFilter() {
+    function filteredScans() {
       const q = (search.value || "").trim().toLowerCase();
-      if (!q) {
-        displayedScans = allScans;
-      } else {
-        displayedScans = allScans.filter(s => {
-          const ident = s.identification || {};
-          const rar = s.rarity || {};
-          const cond = s.condition || {};
-          const hay = [
-            ident.country, ident.denomination, ident.series, ident.year,
-            ident.mint_mark, rar.name, rar.rarity_tier, cond.band, s.notes,
-            s.group_id
-          ].filter(Boolean).join(" ").toLowerCase();
-          return hay.includes(q);
-        });
-      }
-      render();
+      return allScans.filter(s => {
+        if (!q) return true;
+        const ident = s.identification || {};
+        const rar = s.rarity || {};
+        const hay = [ident.country, ident.denomination, ident.series, ident.year,
+          ident.mint_mark, rar.name, rar.rarity_tier, s.rarity_flag, s.notes, s.group_id]
+          .filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      });
     }
 
     function render() {
-      if (!displayedScans.length) {
-        grid.innerHTML = "";
+      const scans = filteredScans();
+      const { years, groups } = groupByYear(scans);
+      yearRail.innerHTML = '<button class="year-chip' + (activeYear === "all" ? " active" : "") + '" data-year="all">All <span class="count">' + scans.length + "</span></button>" +
+        years.map(y => '<button class="year-chip' + (activeYear === y ? " active" : "") + '" data-year="' + y + '">' + y + ' <span class="count">' + groups[y].length + "</span></button>").join("");
+      yearRail.querySelectorAll(".year-chip").forEach(btn => {
+        btn.onclick = () => { activeYear = btn.getAttribute("data-year"); render(); };
+      });
+
+      const showYears = activeYear === "all" ? years : years.filter(y => y === activeYear);
+      if (!scans.length) {
+        collectionsEl.innerHTML = "";
         empty.style.display = "block";
-        empty.querySelector("h2").textContent = allScans.length === 0
-          ? "No scans yet"
-          : "No matches for \"" + (search.value || "") + "\"";
+        empty.querySelector("h2").textContent = allScans.length === 0 ? "No coins yet" : "No matches";
         return;
       }
       empty.style.display = "none";
-      grid.innerHTML = displayedScans.map(renderCard).join("");
+      collectionsEl.innerHTML = showYears.map(y => {
+        const label = y === "Unknown" ? "Unknown year" : y + " collection";
+        return '<section><div class="collection-title"><h2>' + label + "</h2><span>" + groups[y].length + " coin" + (groups[y].length === 1 ? "" : "s") + "</span></div>" +
+          '<div class="scan-grid">' + groups[y].map(renderCard).join("") + "</div></section>";
+      }).join("");
     }
 
-    search.addEventListener("input", applyFilter);
+    search.addEventListener("input", render);
 
-    // Live WebSocket updates.
-    let ws = null;
     function connectWs() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+      const ws = new WebSocket(proto + "://" + location.host + "/ws?token=" + encodeURIComponent(TOKEN));
       ws.onopen = () => { metaConn.textContent = "live"; metaConn.className = "connection-status ok"; };
       ws.onclose = () => {
         metaConn.textContent = "reconnecting…";
-        metaConn.className = "connection-status bad";
+        metaConn.className = "connection-status warn";
         setTimeout(connectWs, 2000);
       };
       ws.onmessage = (ev) => {
@@ -233,18 +238,161 @@
           if (e.type === "hello" && Array.isArray(e.scans)) {
             allScans = e.scans;
             metaTotal.textContent = allScans.length;
-            applyFilter();
-          } else if (e.type && e.type.startsWith("scan.")) {
+            render();
+          } else if (e.type && e.type.indexOf("scan.") === 0) {
             fetchScans();
           }
         } catch (err) { console.error(err); }
       };
     }
 
-    fetchHealth();
-    fetchScans();
-    connectWs();
-    setInterval(fetchHealth, 15000);
+    /* ---- Setup wizard ---- */
+    function openWizard(force) {
+      document.getElementById("wizard").classList.add("open");
+      wiz.step = 1;
+      renderWizard();
+    }
+    function closeWizard() {
+      document.getElementById("wizard").classList.remove("open");
+    }
+
+    function renderWizard() {
+      const body = document.getElementById("wiz-body");
+      const actions = document.getElementById("wiz-actions");
+      const err = document.getElementById("wiz-err");
+      err.textContent = "";
+      document.getElementById("wiz-step-label").textContent = "Step " + wiz.step + " of 4";
+
+      if (wiz.step === 1) {
+        body.innerHTML =
+          "<h2>How many computers?</h2>" +
+          "<p>The phone only talks to this Mac. The vision model can run here, or on a second Windows PC with a GPU.</p>" +
+          '<div class="mode-grid">' +
+            '<button type="button" class="mode-card' + (wiz.mode === "one-computer" ? " selected" : "") + '" id="mode-one"><strong>One computer</strong>Ollama runs on this Mac. Simpler. Slower if there is no GPU.</button>' +
+            '<button type="button" class="mode-card' + (wiz.mode === "two-computer" ? " selected" : "") + '" id="mode-two"><strong>Two computers</strong>This Mac = dashboard. Windows RTX 4070 Ti = rendering. Same Wi‑Fi.</button>' +
+          "</div>";
+        document.getElementById("mode-one").onclick = () => { wiz.mode = "one-computer"; renderWizard(); };
+        document.getElementById("mode-two").onclick = () => { wiz.mode = "two-computer"; renderWizard(); };
+        actions.innerHTML = '<span></span><button class="btn primary" id="wiz-next">Continue</button>';
+        document.getElementById("wiz-next").onclick = () => { wiz.step = 2; renderWizard(); };
+      } else if (wiz.step === 2) {
+        if (wiz.mode === "two-computer") {
+          body.innerHTML =
+            "<h2>Windows GPU box</h2>" +
+            "<p>On the Windows PC: install Ollama, then in PowerShell as Administrator:</p>" +
+            "<p><code>ollama pull qwen2.5vl:7b</code></p>" +
+            "<p>Listen on the LAN (set once, then restart Ollama):</p>" +
+            "<p><code>setx OLLAMA_HOST 0.0.0.0</code> · allow port <code>11434</code> in Windows Firewall.</p>" +
+            '<div class="field"><label>Windows IP address</label><input id="ollama-host" placeholder="192.168.1.80" value="' + escape(wiz.ollama_host) + '" /></div>' +
+            '<div class="field"><label>Ollama port</label><input id="ollama-port" value="' + wiz.ollama_port + '" /></div>';
+        } else {
+          body.innerHTML =
+            "<h2>Ollama on this Mac</h2>" +
+            "<p>Install Ollama, then run:</p>" +
+            "<p><code>ollama pull qwen2.5vl:7b</code></p>" +
+            "<p>We will talk to <code>127.0.0.1:11434</code>.</p>";
+        }
+        actions.innerHTML = '<button class="btn" id="wiz-back">Back</button><button class="btn primary" id="wiz-test">Test connection</button>';
+        document.getElementById("wiz-back").onclick = () => { wiz.step = 1; renderWizard(); };
+        document.getElementById("wiz-test").onclick = testOllamaStep;
+      } else if (wiz.step === 3) {
+        body.innerHTML =
+          "<h2>Phone setup</h2>" +
+          "<p>Sideload the Coinscope APK. In <strong>Settings</strong> type this Mac’s IP and port <code>8000</code>. Same Wi‑Fi. The phone is scanner-only — cards appear here.</p>" +
+          '<p>This Mac’s address:</p><div id="lan-pills"></div>' +
+          "<p class=\"hint\">If the list is empty, run <code>ipconfig getifaddr en0</code> in Terminal.</p>";
+        loadLanPills();
+        actions.innerHTML = '<button class="btn" id="wiz-back">Back</button><button class="btn primary" id="wiz-save">Save & finish</button>';
+        document.getElementById("wiz-back").onclick = () => { wiz.step = 2; renderWizard(); };
+        document.getElementById("wiz-save").onclick = saveSetup;
+      } else {
+        body.innerHTML = "<h2>Ready</h2><p>Scan from the phone. Each upload joins the GPU queue so you can keep shooting. Rare / notable / common lands on a year collection card in about four seconds when the 4070 Ti is warm.</p>";
+        actions.innerHTML = '<span></span><button class="btn primary" id="wiz-done">Open dashboard</button>';
+        document.getElementById("wiz-done").onclick = closeWizard;
+      }
+    }
+
+    async function loadLanPills() {
+      try {
+        const r = await fetch("/api/setup");
+        const s = await r.json();
+        const el = document.getElementById("lan-pills");
+        const ips = s.lan_ips || [];
+        el.innerHTML = ips.length
+          ? ips.map(ip => '<span class="ip-pill">' + escape(ip) + "</span>").join("")
+          : "<span class=\"ip-pill\">unknown — check System Settings → Network</span>";
+      } catch (e) {}
+    }
+
+    async function testOllamaStep() {
+      const err = document.getElementById("wiz-err");
+      err.textContent = "Testing…";
+      if (wiz.mode === "two-computer") {
+        wiz.ollama_host = document.getElementById("ollama-host").value.trim();
+        wiz.ollama_port = parseInt(document.getElementById("ollama-port").value, 10) || 11434;
+        if (!wiz.ollama_host) { err.textContent = "Enter the Windows IP."; return; }
+      }
+      try {
+        const r = await fetch("/api/setup/test-ollama", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            ollama_host: wiz.mode === "two-computer" ? wiz.ollama_host : "127.0.0.1",
+            ollama_port: wiz.mode === "two-computer" ? wiz.ollama_port : 11434,
+            model: "qwen2.5vl:7b",
+          }),
+        });
+        const j = await r.json();
+        if (!j.ok) { err.textContent = "Cannot reach Ollama at " + j.base + " — " + (j.error || ""); return; }
+        if (!j.has_model) {
+          err.textContent = "Connected, but qwen2.5vl:7b is not pulled yet. Run: ollama pull qwen2.5vl:7b";
+          return;
+        }
+        wiz.step = 3;
+        renderWizard();
+      } catch (e) {
+        err.textContent = String(e.message || e);
+      }
+    }
+
+    async function saveSetup() {
+      const err = document.getElementById("wiz-err");
+      try {
+        const r = await fetch("/api/setup", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            mode: wiz.mode,
+            ollama_host: wiz.mode === "two-computer" ? wiz.ollama_host : "127.0.0.1",
+            ollama_port: wiz.mode === "two-computer" ? wiz.ollama_port : 11434,
+            model: "qwen2.5vl:7b",
+          }),
+        });
+        if (!r.ok) { err.textContent = "Save failed (" + r.status + ")"; return; }
+        wiz.step = 4;
+        renderWizard();
+        fetchHealth();
+      } catch (e) {
+        err.textContent = String(e.message || e);
+      }
+    }
+
+    (async function boot() {
+      const health = await fetchHealth();
+      fetchScans();
+      connectWs();
+      setInterval(fetchHealth, 15000);
+      try {
+        const r = await fetch("/api/setup");
+        const s = await r.json();
+        if (!s.completed) openWizard();
+        else if (health && !health.ollama) {
+          metaConn.textContent = "model offline — open Setup";
+        }
+      } catch (e) {
+        openWizard();
+      }
+    })();
   </script>
 </body>
 </html>

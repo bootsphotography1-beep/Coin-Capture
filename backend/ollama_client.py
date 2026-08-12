@@ -1,105 +1,50 @@
-"""Ollama client. Wraps vision model + structured coin identification."""
+"""Ollama client. Vision identification tuned for US pocket change on a local GPU.
+
+Latency knobs (aimed at ~3–4s identify on an RTX 4070 Ti):
+  - Cropped coin already fills the frame (caller should crop first)
+  - Downscale to MODEL_MAX_DIM before upload to Ollama
+  - Small num_ctx / num_predict (qwen2.5vl defaults to a huge context)
+  - keep_alive so the model stays in VRAM between scans
+  - JSON mode + a short US-only prompt
+"""
 from __future__ import annotations
-import base64
-import io
 import json
 import re
 from typing import Any
 import httpx
 
 from . import config
+from . import crop
 
 
 class OllamaError(Exception):
     pass
 
 
-def _image_to_b64(image_bytes: bytes) -> str:
-    return base64.b64encode(image_bytes).decode("ascii")
-
-
-# Identification prompt. Asks the model to extract structured fields then output JSON.
-# Note: small models like moondream 1B often can't reliably produce structured JSON,
-# so we use a generous prompt and a tolerant JSON parser.
 _IDENTIFY_SYSTEM = (
-    "You are a coin identification expert with knowledge of US and world coinage. "
-    "You will be shown photographs of coins. Your job is to extract identifying "
-    "information and return ONLY valid JSON, no markdown fences, no commentary, "
-    "no prose before or after the JSON. If a field is unreadable, use null. "
-    "Do not guess values you cannot see. Pay special attention to mint marks, "
-    "designer initials (like VDB on Lincoln cents), and any doubled-letter or "
-    "doubled-date evidence — these can indicate valuable varieties."
+    "You identify United States circulating coins from photographs. "
+    "Return ONLY a JSON object. No markdown. No extra keys. "
+    "If a field is unreadable, use null. Do not guess a year or mint mark you cannot see."
 )
 
-_IDENTIFY_PROMPT_TEMPLATE = """Look at this photograph of a coin.
+_IDENTIFY_PROMPT = """This photo is a cropped US coin (pocket change). Read the date and mint mark carefully.
 
-Return JSON with these exact keys (do not copy the example values literally — fill in what you actually see in the image):
-
-{{
-  "country": "United States" or null,
-  "denomination": "One Cent" or null,
-  "series": "Lincoln Wheat Cent" or null,
-  "year": "1909" or null,
-  "mint_mark": "D" or null,
-  "is_obverse": true,
-  "obverse_description": "brief description of what is on the obverse",
-  "reverse_description": "brief description of what is on the reverse if visible, else empty string",
-  "composition": "copper" or "silver" or "cupronickel" or "gold" or "brass" or null,
-  "diameter_estimate_mm": 24,
-  "visible_text": ["LIBERTY", "IN GOD WE TRUST"],
-  "image_quality": {{"sharp": true, "well_lit": true, "obstructed": false}},
-  "notes": "any uncertainty or observations"
-}}
-
-Return only the JSON object. Do not include arrays of placeholder text."""
+Return JSON:
+{"country":"United States","denomination":"One Cent|Five Cents|Dime|Quarter Dollar|Half Dollar|One Dollar or null","series":"Lincoln Shield Cent|Lincoln Memorial Cent|Lincoln Wheat Cent|Jefferson Nickel|Roosevelt Dime|Washington Quarter|Kennedy Half Dollar|or the true series","year":"YYYY or null","mint_mark":"P|D|S|W|empty string if none visible","composition":"copper|zinc|cupronickel|silver|clad|null","visible_text":["..."],"notes":"short"}
+"""
 
 
 def _strip_fences(text: str) -> str:
-    """Remove markdown code fences and any prose around the JSON object."""
     text = text.strip()
-    # Remove leading/trailing fences
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    # Find the first { and last }
     a, b = text.find("{"), text.rfind("}")
     if a >= 0 and b > a:
         return text[a : b + 1]
     return text
 
 
-def _parse_ident_json(text: str) -> dict[str, Any]:
-    """Tolerant JSON parser for small-vision-model output.
-
-    Tries (in order):
-      1. Strict parse of the cleaned text.
-      2. If the model wrapped the object in a list, extract the first element.
-      3. Find the outermost balanced {...} block and parse that.
-      4. Try to repair common formatting issues (trailing commas, doubled braces).
-    """
-    cleaned = _strip_fences(text)
-    # 1. Strict parse
-    try:
-        return _unwrap(json.loads(cleaned))
-    except json.JSONDecodeError:
-        pass
-    # 2. Balanced-brace extraction (handles nested objects correctly).
-    candidate = _find_outer_json(cleaned)
-    if candidate:
-        # Repair doubled braces {{ }} -> { } (llava's quirk).
-        repaired = re.sub(r"\{\{", "{", candidate)
-        repaired = re.sub(r"\}\}", "}", repaired)
-        # Repair trailing commas before closing.
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-        try:
-            return _unwrap(json.loads(repaired))
-        except json.JSONDecodeError:
-            pass
-    raise OllamaError(f"No JSON found in model output: {text[:300]}")
-
-
 def _find_outer_json(text: str) -> str | None:
-    """Find the first balanced {...} block (handles one level of nesting).
-    Returns the substring, or None if not found."""
     start = text.find("{")
     if start < 0:
         return None
@@ -128,9 +73,6 @@ def _find_outer_json(text: str) -> str | None:
 
 
 def _unwrap(value: Any) -> dict[str, Any]:
-    """If the model returned a list of one dict, return that dict.
-    If it's a dict with a single key whose value is a dict, unwrap that.
-    Otherwise return as-is (must be a dict)."""
     if isinstance(value, list):
         if not value:
             raise OllamaError("Model returned an empty JSON array")
@@ -142,23 +84,46 @@ def _unwrap(value: Any) -> dict[str, Any]:
     raise OllamaError(f"Model returned {type(value).__name__}, not dict")
 
 
-def identify_coin(image_bytes: bytes, *, timeout_s: float = 120.0) -> dict[str, Any]:
-    """Call the local vision model to identify a coin from a photo.
-    Returns the parsed JSON dict. Raises OllamaError on transport/parse failures.
-    """
-    img_b64 = _image_to_b64(image_bytes)
+def _parse_ident_json(text: str) -> dict[str, Any]:
+    cleaned = _strip_fences(text)
+    try:
+        return _unwrap(json.loads(cleaned))
+    except json.JSONDecodeError:
+        pass
+    candidate = _find_outer_json(cleaned)
+    if candidate:
+        repaired = re.sub(r"\{\{", "{", candidate)
+        repaired = re.sub(r"\}\}", "}", repaired)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        try:
+            return _unwrap(json.loads(repaired))
+        except json.JSONDecodeError:
+            pass
+    raise OllamaError(f"No JSON found in model output: {text[:300]}")
+
+
+def identify_coin(image_bytes: bytes, *, timeout_s: float | None = None) -> dict[str, Any]:
+    timeout_s = timeout_s if timeout_s is not None else config.IDENTIFY_TIMEOUT_S
+    small = crop.downscale_for_model(image_bytes, max_dim=config.MODEL_MAX_DIM)
+    img_b64 = __import__("base64").b64encode(small).decode("ascii")
     body = {
         "model": config.OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": _IDENTIFY_SYSTEM},
             {
                 "role": "user",
-                "content": _IDENTIFY_PROMPT_TEMPLATE,
+                "content": _IDENTIFY_PROMPT,
                 "images": [img_b64],
             },
         ],
         "stream": False,
-        "options": {"temperature": 0.1},
+        "format": "json",
+        "keep_alive": "60m",
+        "options": {
+            "temperature": 0.0,
+            "num_ctx": 2048,
+            "num_predict": 180,
+        },
     }
     try:
         resp = httpx.post(
@@ -176,13 +141,30 @@ def identify_coin(image_bytes: bytes, *, timeout_s: float = 120.0) -> dict[str, 
     text = data.get("message", {}).get("content", "")
     if not text:
         raise OllamaError(f"Ollama returned empty content: {data}")
-    return _parse_ident_json(text)
+    parsed = _parse_ident_json(text)
+    # Normalize year to a 4-digit string when possible.
+    year = parsed.get("year")
+    if year is not None:
+        parsed["year"] = str(year).strip()[:4] or None
+    mm = parsed.get("mint_mark")
+    if isinstance(mm, str):
+        parsed["mint_mark"] = mm.strip().upper()[:2] or None
+    return parsed
 
 
 def is_ollama_alive() -> bool:
-    """Cheap liveness check for /health."""
     try:
         r = httpx.get(f"{config.OLLAMA_BASE}/api/tags", timeout=3.0)
         return r.status_code == 200
     except httpx.HTTPError:
         return False
+
+
+def list_models() -> list[str]:
+    try:
+        r = httpx.get(f"{config.OLLAMA_BASE}/api/tags", timeout=5.0)
+        if r.status_code != 200:
+            return []
+        return [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+    except httpx.HTTPError:
+        return []

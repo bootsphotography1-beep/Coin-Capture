@@ -1,22 +1,9 @@
 """Second-stage rarity specialist.
 
-After llava:7b identifies the coin, this module consults a *separate* model
-(text-only, factual-recall oriented) to assess rarity and value. The point
-of using a different model:
-
-  - llava is good at vision, weak at structured numismatic knowledge
-  - llama3.1:8b (or similar text-only Llama) is the opposite — no vision,
-    but stronger factual recall about mintage figures, varieties, and
-    auction-realized prices because it was trained on more general text data
-
-We use the canonical DB first (instant, deterministic, correct for the
-common ~25 entries we have), and only call this specialist when the
-canonical DB missed AND llava's identification has the key fields we need
-(series + year at minimum).
-
-Like ollama_client.py, JSON output is parsed with the same tolerant parser.
-The specialist prompt explicitly forbids re-identifying the coin — it only
-rates rarity/value based on the identification we hand it.
+Used only when the US canonical table misses. Default model is the same
+vision model (qwen2.5vl:7b) so the 4070 Ti does not cold-load a second
+8B checkpoint. Override with COINSCOPE_RARITY_MODEL if you want a text-only
+specialist and can spare the extra seconds.
 """
 from __future__ import annotations
 import json
@@ -30,9 +17,9 @@ from . import config
 
 log = logging.getLogger("coinscope.rarity_specialist")
 
-# Default to llama3.1:8b (text-only, fast, good at factual recall).
-# Can be overridden with COINSCOPE_RARITY_MODEL env var.
-RARITY_MODEL = getattr(config, "RARITY_MODEL", None) or "llama3.1:8b"
+# Same GPU as vision by default so we don't cold-load a second 8B model
+# (that would blow the ~4s budget). Override with COINSCOPE_RARITY_MODEL.
+RARITY_MODEL = config.RARITY_MODEL
 
 _RARITY_SYSTEM = (
     "You are a numismatist with deep knowledge of US and world coinage. "
@@ -181,7 +168,9 @@ def research_rarity_specialist(identification: dict, *, timeout_s: float = 180.0
             {"role": "user", "content": prompt},
         ],
         "stream": False,
-        "options": {"temperature": 0.1},
+        "format": "json",
+        "keep_alive": "60m",
+        "options": {"temperature": 0.1, "num_ctx": 2048, "num_predict": 220},
     }
     log.info("Calling rarity specialist model=%s timeout=%.0fs", RARITY_MODEL, timeout_s)
     t0 = time.monotonic()

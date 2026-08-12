@@ -1,188 +1,127 @@
 # Coinscope
 
-Local-only coin scanner. Samsung camera → Wi-Fi → Mac backend → Ollama vision model → live dashboard.
+Local coin scanner for US pocket change.
+
+Phone (scanner-only APK) → Mac (FastAPI dashboard) → Windows RTX 4070 Ti or the Mac (Ollama) → year collections on the dashboard.
+
+Target: about **4 seconds** from upload to rare / notable / common once the vision model is warm. You can keep scanning; uploads sit in a GPU queue.
 
 ```
-┌──────────────┐      Wi-Fi      ┌──────────────┐      localhost      ┌──────────┐
-│ Samsung app  │ ───────────────►│   Mac app    │ ──────────────────► │  Ollama  │
-│  (camera +   │   POST /api/    │  (FastAPI +  │    /api/chat        │  llava:7b│
-│   upload)    │   upload        │   SQLite)    │                     │          │
-└──────────────┘                 └──────────────┘                     └──────────┘
-                                        │   ▲
-                                        ▼   │ WebSocket /ws
-                                  ┌──────────────┐
-                                  │   Dashboard  │
-                                  │   browser    │
-                                  └──────────────┘
+┌──────────────┐   Wi-Fi    ┌──────────────────┐   LAN HTTP    ┌─────────────────────┐
+│ Samsung APK  │ ─────────► │ Mac              │ ────────────► │ Windows (optional)  │
+│ camera only  │  :8000     │ FastAPI + SQLite │  :11434       │ Ollama qwen2.5vl:7b │
+│ IP + port    │            │ live dashboard   │               │ RTX 4070 Ti         │
+└──────────────┘            └────────┬─────────┘               └─────────────────────┘
+                                     │ WebSocket
+                                     ▼
+                               Year collections
+                               Cropped coin cards
 ```
 
-Everything stays on your local network. No cloud, no API keys, no per-scan cost.
+No cloud. No API keys. Sideload the APK.
 
-## Features
+## What you get
 
-- Auto-detection of a coin in the camera viewfinder; auto-capture when steady
-- Front + reverse photo capture with side-pairing
-- Local vision model identifies the coin (country, denomination, series, year, mint mark, composition)
-- Curated US coin database short-circuits the rarity lookup for common coins (Lincoln Wheat, Mercury Dime, Morgan Dollar, etc.)
-- Photo-based condition estimate (sharpness + luma + wear signal) with confidence
-- Wikipedia summary + auction source links (eBay sold, PCGS, NGC, Heritage)
-- Live-updating dashboard via WebSocket
-- Search, CSV export, plain-text report
-- Duplicate-scan detection (same series/year/mint scanned within the session)
+- In-app **Settings** on the phone: Mac IP + port + token
+- First-run **wizard** on the Mac: one computer or two
+- Coin is **cropped** (circle on a dark background) before it hits the dashboard
+- Collections **grouped by year**
+- Rare / notable / common badge + LLM value range
+- Queue: capture the next coin while the 4070 Ti finishes the last one
 
-## Requirements
+## Model
 
-- **Mac** running macOS 12+, Python 3.10+
-- **Ollama** installed locally with the `llava:7b` model pulled
-- **Samsung** phone (or any Android with Chrome), camera permission granted
-- Both devices on the same Wi-Fi network
+Default: **`qwen2.5vl:7b`** — best speed/accuracy for dates and mint marks on a 4070 Ti (~6 GB weights). US pocket-change rarity uses a local canonical table so a second LLM call is skipped on common coins.
 
-## Quick start (Mac)
+## Setup
+
+### A. Mac (dashboard)
 
 ```bash
-# 1. Pull the vision model (one-time, ~4.7 GB)
-ollama pull llava:7b
-
-# 2. Install Python deps
 python3 -m venv backend/.venv
 source backend/.venv/bin/activate
 pip install -r backend/requirements.txt
-
-# 3. Run the backend
 python run.py
-# Server listens on http://0.0.0.0:8000
-
-# 4. Find your Mac's LAN IP (so the phone can reach it)
-ifconfig | grep "inet " | grep -v 127.0.0.1
-# e.g. 192.168.1.50
-
-# 5. Open the dashboard in any browser on the Mac
-open http://localhost:8000/dashboard
-
-# 6. From the Samsung, open Chrome and visit
-#    http://192.168.1.50:8000/scan
-#    (Replace 192.168.1.50 with your actual Mac IP)
-
-# Optional: set a real auth token for the LAN
-export COINSCOPE_TOKEN=some-secret-string
-python run.py
-# Then on the phone, visit:
-# http://192.168.1.50:8000/scan?token=some-secret-string
+# http://0.0.0.0:8000
 ```
 
-## V3 Android shell (Capacitor scaffold)
+Open **http://localhost:8000/dashboard**. The wizard asks:
 
-The `android-shell/` folder is also packaged as a standalone npm module for
-rebuilding and re-publishing the Android wrapper independently.
+1. **One computer** — Ollama on this Mac (`127.0.0.1:11434`)
+2. **Two computers** — this Mac stays the dashboard; enter the **Windows IP** (Ollama port `11434`)
+
+Allow port **8000** in the Mac firewall (System Settings → Network → Firewall).
+
+### B. Windows GPU box (two-computer)
+
+1. Install [Ollama for Windows](https://ollama.com/download)
+2. Pull the vision model:
+
+```bat
+ollama pull qwen2.5vl:7b
+```
+
+3. Listen on the LAN (PowerShell **as Administrator**, then restart Ollama from the tray):
+
+```bat
+setx OLLAMA_HOST 0.0.0.0
+```
+
+4. Windows Firewall → inbound TCP **11434**
+5. Same Wi‑Fi as the Mac. In the Mac wizard, type this PC’s IPv4 (`ipconfig`)
+
+### C. One-computer (Ollama on the Mac)
+
+```bash
+ollama pull qwen2.5vl:7b
+python run.py
+```
+
+Leave Ollama on localhost. The phone still talks only to the Mac.
+
+### D. Android APK (sideload, Android 6+)
 
 ```bash
 cd android-shell
 npm install
-
-# Edit capacitor.config.json — point server.url at your Mac's LAN IP
-
-# Sync web assets into the native project
-npx cap sync android
-
-# Build APK from the command line
-npm run build:debug   # APK at android/app/build/outputs/apk/debug/app-debug.apk
-npm run build:release # requires signing config
-
-# Or open in Android Studio for full IDE workflow
-npm run open
+npm run build:debug
+# APK: android/app/build/outputs/apk/debug/app-debug.apk
+adb install android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Pack the Android shell as a tarball
+On the phone: **Settings → Mac IP + port 8000**. Token defaults to `coinscope-dev-token-change-me` unless you set `COINSCOPE_TOKEN` on the Mac.
 
-```bash
-cd android-shell
-npm run pack
-# → coinscope-android-shell-0.1.0.tgz (~240 KB)
-```
-
-The tarball contains only the source scaffold (Gradle, Java, resources, web
-loader) — no `node_modules/`, no build outputs. Recipients run
-`npm install && npx cap sync android` to regenerate `node_modules` and copy
-fresh web assets.
-
-To publish to the npm registry when you're ready:
-```bash
-cd android-shell
-npm login
-npm publish --access public
-# → https://www.npmjs.com/package/coinscope-android-shell
-```
-
-### Quick start (Android app, native shell)
-
-The `android-shell/` folder contains a Capacitor scaffold that wraps the
-backend's `/scan` page into a real Android app with full-screen, no browser
-chrome, and a launcher icon.
-
-```bash
-cd android-shell
-npm install
-
-# Edit capacitor.config.json to point at your Mac:
-#   server.url: "http://192.168.1.50:8000"
-
-npx cap sync android
-
-# Open in Android Studio (Mac only — needs Android SDK)
-npx cap open android
-# Build → Run on your Samsung
-```
-
-## Layout
-
-```
-coinscope/
-├── run.py                       # Uvicorn launcher
-├── backend/
-│   ├── app.py                   # HTTP + WebSocket routes
-│   ├── config.py                # Env-driven settings
-│   ├── db.py                    # SQLite layer
-│   ├── ollama_client.py         # Vision model wrapper + JSON parser
-│   ├── canonical.py             # US coin short-circuit DB
-│   ├── rarity.py                # Model-based rarity report
-│   ├── condition.py             # Image-only condition estimator
-│   ├── comparables.py           # Wikipedia + auction source links
-│   ├── jobs.py                  # Background queue + WS broadcast
-│   ├── static/
-│   │   ├── scanner.html         # Phone scanner page
-│   │   ├── dashboard.html       # Mac dashboard
-│   │   └── styles.css
-│   └── requirements.txt
-├── data/
-│   ├── coinscope.db             # Created on first run
-│   └── photos/                  # Coin photos, organized by group_id
-├── android-shell/               # Capacitor Android scaffold
-│   ├── capacitor.config.json    # Mac IP goes here
-│   ├── www/                     # Web assets bundled into APK
-│   └── android/                 # Native Android project
-└── tests/
-    └── test_coin_synthetic.png  # Synthetic test coin (1909-style)
-```
+The phone is scanner-only. Cards, rarity, and year collections appear on the Mac dashboard.
 
 ## Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `COINSCOPE_HOST` | `0.0.0.0` | Server bind address |
-| `COINSCOPE_PORT` | `8000` | Server port |
-| `COINSCOPE_TOKEN` | `coinscope-dev-token-change-me` | Shared secret for the scanner |
-| `COINSCOPE_MODEL` | `llava:7b` | Ollama model name |
-| `OLLAMA_BASE` | `http://127.0.0.1:11434` | Ollama server URL |
-| `COINSCOPE_WORKERS` | `1` | Background job threads (raise for higher throughput) |
-| `COINSCOPE_CANONICAL` | `1` | Set `0` to bypass the canonical short-circuit |
+| `COINSCOPE_HOST` | `0.0.0.0` | Bind address |
+| `COINSCOPE_PORT` | `8000` | Dashboard / API port |
+| `COINSCOPE_TOKEN` | `coinscope-dev-token-change-me` | Shared secret |
+| `COINSCOPE_MODEL` | `qwen2.5vl:7b` | Vision model |
+| `OLLAMA_BASE` | from wizard, else `http://127.0.0.1:11434` | GPU box URL |
+| `COINSCOPE_WORKERS` | `1` | Keep at 1 so the 4070 Ti is not oversubscribed |
+| `COINSCOPE_IDENTIFY_TIMEOUT` | `25` | Seconds for one vision call |
+
+Wizard settings live in `data/setup.json` (not committed). Env vars override the wizard.
+
+## Layout
+
+```
+run.py
+backend/           FastAPI, crop, canonical US DB, jobs
+android-shell/     Capacitor APK (local scanner + settings)
+data/              SQLite + cropped photos (created at runtime)
+```
 
 ## Limitations
 
-- Photo-only identification: blurry, dark, or partial photos will produce uncertain results
-- Photo-only condition: a real grade requires physical inspection (weight, luster, surfaces)
-- Auction comparables: only links to public sources; full sold-listing data requires an eBay API key
-- Identification accuracy: llava:7b is the smallest practical vision model. Varieties, errors, and rare dates may need a second opinion
-- No authentication beyond a shared token — fine for a home LAN, not for the public internet
+- Photo-only ID and condition — not a professional grade
+- US circulating coinage first; world coins / errors need a later pass
+- Value ranges are screening estimates from the local table + model, not live auction comps
+- First inference after Ollama starts can be slower (weights loading). Later scans should be near the 4s target on a 4070 Ti
 
 ## License
 

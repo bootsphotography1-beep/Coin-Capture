@@ -131,7 +131,9 @@ def research_rarity(identification: dict, *, timeout_s: float = 120.0) -> dict[s
             {"role": "user", "content": prompt},
         ],
         "stream": False,
-        "options": {"temperature": 0.2},
+        "format": "json",
+        "keep_alive": "60m",
+        "options": {"temperature": 0.2, "num_ctx": 2048, "num_predict": 220},
     }
     try:
         resp = httpx.post(

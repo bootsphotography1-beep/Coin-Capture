@@ -1,9 +1,8 @@
 """Background job queue and live event broadcast.
 
 The scanner posts a photo; we return immediately so the phone can keep scanning.
-A thread pool worker picks up the scan, runs identification + condition +
-rarity, and updates the row in SQLite. Connected dashboard WebSockets
-receive each state change in real time.
+A single GPU worker processes the queue: crop → identify → canonical rarity
+(target ~4s on an RTX 4070 Ti). Comparables run after the card is already live.
 """
 from __future__ import annotations
 import asyncio
@@ -16,21 +15,20 @@ from typing import Any
 import weakref
 
 from . import config
+from . import crop
 from . import db
 from . import ollama_client
 from . import rarity
 from . import rarity_specialist
 from . import condition
 from . import comparables
+from .canonical import lookup_canonical, rarity_flag
 
 log = logging.getLogger("coinscope.jobs")
 
-# Connected WebSocket clients. Weak refs so closed sockets can be GC'd.
 _clients: weakref.WeakSet = weakref.WeakSet()
 _loop: asyncio.AbstractEventLoop | None = None
 
-# Bounded thread pool. Ollama is single-streamed per model, so a small pool
-# prevents the Mac from queueing 50 concurrent model calls.
 _executor = ThreadPoolExecutor(
     max_workers=int(__import__("os").environ.get("COINSCOPE_WORKERS", "1")),
     thread_name_prefix="coinscope",
@@ -51,7 +49,6 @@ def unregister_client(ws) -> None:
 
 
 async def broadcast(event: dict[str, Any]) -> None:
-    """Send an event to every connected dashboard WebSocket. Drops on error."""
     if not _clients:
         return
     msg = json.dumps(event, default=str, ensure_ascii=False)
@@ -66,7 +63,6 @@ async def broadcast(event: dict[str, Any]) -> None:
 
 
 def _emit_sync(event: dict[str, Any]) -> None:
-    """Schedule a broadcast from a worker thread."""
     if _loop is None:
         log.warning("No event loop registered; dropping event %s", event.get("type"))
         return
@@ -74,17 +70,37 @@ def _emit_sync(event: dict[str, Any]) -> None:
 
 
 def enqueue_scan(scan_id: int, group_id: str) -> None:
-    """Submit identification + rarity processing for one scan."""
     _executor.submit(_process_scan, scan_id, group_id)
 
 
-def _process_scan(scan_id: int, group_id: str) -> None:
-    """Worker thread: identify + research. Updates DB and broadcasts.
+def _crop_and_replace(path: str | None) -> bytes | None:
+    """Crop the coin in-place so dashboard cards show the coin, not the table."""
+    if not path:
+        return None
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return None
+    orig_path = p.with_name(p.stem + "_original" + p.suffix)
+    if orig_path.exists():
+        return p.read_bytes()
+    original = p.read_bytes()
+    try:
+        cropped, meta = crop.crop_coin(original)
+        # Keep the original next to the cropped file for debugging/reprocess.
+        orig_path = p.with_name(p.stem + "_original" + p.suffix)
+        if not orig_path.exists():
+            orig_path.write_bytes(original)
+        p.write_bytes(cropped)
+        log.info("Cropped %s via %s", p.name, meta.get("method"))
+        return cropped
+    except Exception as e:
+        log.warning("Crop failed for %s: %s", path, e)
+        return original
 
-    Idempotent: if a scan is re-enqueued (e.g. the reverse photo was just
-    attached to a previously-completed scan), we re-run identification on
-    the reverse photo (if not already done), refresh the rarity report,
-    and re-broadcast."""
+
+def _process_scan(scan_id: int, group_id: str) -> None:
+    t0 = time.monotonic()
     try:
         scan = db.get_scan(scan_id)
         if not scan:
@@ -94,31 +110,23 @@ def _process_scan(scan_id: int, group_id: str) -> None:
         front_path = scan.get("front_photo_path")
         reverse_path = scan.get("reverse_photo_path")
         ident = scan.get("identification")
-        already_complete = scan.get("status") == "complete" and ident
 
-        # First pass on the front, or refresh if front was processed but we have
-        # no identification cached.
-        if not ident and front_path:
+        front_bytes = _crop_and_replace(front_path) if front_path else None
+        rev_bytes = _crop_and_replace(reverse_path) if reverse_path else None
+
+        if not ident and front_bytes:
             db.set_status(scan_id, "identifying")
             _emit_sync({"type": "scan.status", "scan_id": scan_id, "group_id": group_id, "status": "identifying"})
             try:
-                with open(front_path, "rb") as f:
-                    front_bytes = f.read()
                 ident = ollama_client.identify_coin(front_bytes)
                 db.set_identification(scan_id, ident)
+                cond = condition.estimate_condition(front_bytes)
+                db.set_condition(scan_id, cond)
                 _emit_sync({
                     "type": "scan.identification",
                     "scan_id": scan_id,
                     "group_id": group_id,
                     "identification": ident,
-                })
-                # Condition estimate from the front photo (best signal).
-                cond = condition.estimate_condition(front_bytes)
-                db.set_condition(scan_id, cond)
-                _emit_sync({
-                    "type": "scan.condition",
-                    "scan_id": scan_id,
-                    "group_id": group_id,
                     "condition": cond,
                 })
             except ollama_client.OllamaError as e:
@@ -127,42 +135,30 @@ def _process_scan(scan_id: int, group_id: str) -> None:
                 _emit_sync({"type": "scan.error", "scan_id": scan_id, "group_id": group_id, "error": str(e)})
                 return
 
-        # If a reverse photo is present and we haven't described it yet, do that.
-        if reverse_path and (not ident or "reverse_identification" not in ident):
+        if reverse_path and rev_bytes and (not ident or "reverse_identification" not in (ident or {})):
             try:
-                with open(reverse_path, "rb") as f:
-                    rev_bytes = f.read()
                 rev_ident = ollama_client.identify_coin(rev_bytes)
+                ident = ident or {}
                 ident["reverse_identification"] = rev_ident
                 db.set_identification(scan_id, ident)
-                # If the reverse is sharper/better-lit than the front, use it for condition.
                 rev_cond = condition.estimate_condition(rev_bytes)
-                # Keep whichever condition has higher confidence.
                 cur_cond = scan.get("condition") or {}
                 if rev_cond.get("confidence", 0) > cur_cond.get("confidence", 0):
                     db.set_condition(scan_id, rev_cond)
             except Exception as e:
                 log.warning("Reverse photo identification failed: %s", e)
 
-        # Rarity research — skip if we already did this and nothing changed.
         if not ident:
             db.set_status(scan_id, "error", error="No identification available")
             _emit_sync({"type": "scan.error", "scan_id": scan_id, "group_id": group_id, "error": "No identification"})
             return
 
         if scan.get("rarity") and not reverse_path:
-            # Already researched and no new info — just make sure status is complete.
             db.set_status(scan_id, "complete")
             return
 
         db.set_status(scan_id, "researching")
         _emit_sync({"type": "scan.status", "scan_id": scan_id, "group_id": group_id, "status": "researching"})
-
-        # Two-stage rarity resolution:
-        #   1. Canonical DB lookup (instant, deterministic, correct for known common coins)
-        #   2. Rarity-specialist model (text-only, good factual recall — only on canonical miss)
-        #   3. Generic llava rarity fallback (last resort, slower, less reliable)
-        from canonical import lookup_canonical  # local import to avoid cycle
 
         report: dict | None = None
         rarity_source = None
@@ -171,26 +167,25 @@ def _process_scan(scan_id: int, group_id: str) -> None:
             if report is not None:
                 rarity_source = "canonical"
 
-        # Stage 2: specialist — only when we have enough info to research
+        # Specialist only on a canonical miss — US pocket change should almost
+        # always hit the DB so the 4s budget stays intact.
         if report is None and rarity_specialist.has_enough_info_for_specialist(ident):
             try:
-                report = rarity_specialist.research_rarity_specialist(ident)
+                report = rarity_specialist.research_rarity_specialist(ident, timeout_s=20.0)
                 rarity_source = "specialist"
-                log.info("Specialist succeeded for scan %s in %.1fs",
-                         scan_id, report.get("specialist_elapsed_s", -1))
             except Exception as e:
-                log.warning(
-                    "Rarity specialist failed for scan %s (%s: %s), falling through to generic",
-                    scan_id, type(e).__name__, e,
-                )
+                log.warning("Rarity specialist failed for scan %s: %s", scan_id, e)
                 report = None
 
-        # Stage 3: generic fallback (also uses llava, slower, broader)
         if report is None:
-            report = rarity.research_rarity(ident)
-            rarity_source = "generic"
+            report = rarity.research_rarity(ident, timeout_s=20.0)
+            rarity_source = report.get("source") or "generic"
 
         report["rarity_source"] = rarity_source
+        report["source"] = rarity_source
+        report["flag"] = rarity_flag(report.get("rarity_tier"))
+        elapsed = round(time.monotonic() - t0, 2)
+        report["elapsed_s"] = elapsed
         db.set_rarity(scan_id, report)
         db.set_status(scan_id, "complete")
         _emit_sync({
@@ -198,10 +193,11 @@ def _process_scan(scan_id: int, group_id: str) -> None:
             "scan_id": scan_id,
             "group_id": group_id,
             "rarity": report,
+            "identification": ident,
+            "elapsed_s": elapsed,
         })
+        log.info("Scan %s complete in %.2fs flag=%s source=%s", scan_id, elapsed, report.get("flag"), rarity_source)
 
-        # Duplicate detection: if the same coin (series/year/mint) was scanned
-        # recently, flag it on the dashboard. Useful for catching re-scans.
         try:
             dupes = db.find_duplicates_by_fingerprint(
                 ident.get("series") or "",
@@ -219,8 +215,7 @@ def _process_scan(scan_id: int, group_id: str) -> None:
         except Exception as e:
             log.warning("Duplicate check failed for scan %s: %s", scan_id, e)
 
-        # Enrich with comparables (Wikipedia summary + auction source links).
-        # Best-effort: a network failure here doesn't undo the scan.
+        # After the card is live — Wikipedia etc. must not delay "is it rare?"
         try:
             comp = comparables.find_comparables(ident)
             db.set_comparables(scan_id, comp)

@@ -11,8 +11,10 @@
   ],
   "scripts": {
     "sync": "cap sync android",
+    "sync-www": "cp ../backend/static/scanner.html www/index.html && cp ../backend/static/styles.css www/styles.css",
     "open": "cap open android",
-    "build:debug": "cap sync android && cd android && ./gradlew assembleDebug",
+    "build:debug": "npm run sync-www && cap sync android && cd android && ./gradlew assembleDebug",
+    "build:release": "npm run sync-www && cap sync android && cd android && ./gradlew assembleRelease",
     "build:release": "cap sync android && cd android && ./gradlew assembleRelease",
     "pack": "cap sync android && npm pack"
   },
