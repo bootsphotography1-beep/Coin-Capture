@@ -2,30 +2,359 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <meta name="format-detection" content="telephone=no" />
-  <meta name="theme-color" content="#0d0f12" />
-  <title>Coinscope</title>
-  <style>
-    body { margin: 0; background: #0d0f12; color: #e8eaee; font-family: -apple-system, sans-serif;
-           display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-    .loader { text-align: center; }
-    .spinner { width: 36px; height: 36px; border: 3px solid #2a313d; border-top-color: #d4a55a;
-               border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    p { color: #9aa3b0; font-size: 14px; margin: 0; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d10" />
+  <title>Coinscope — Scanner</title>
+  <link rel="stylesheet" href="styles.css" id="css-local" />
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <div class="loader">
-    <div class="spinner"></div>
-    <p>Connecting to Coinscope…</p>
+  <div class="scanner-wrap">
+    <header class="scanner-header">
+      <h1>COINSCOPE</h1>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div id="conn" class="connection-status">Connecting…</div>
+        <button class="icon-btn" id="btn-settings" type="button" aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="camera-frame">
+      <video id="cam" playsinline autoplay muted></video>
+      <canvas id="frame"></canvas>
+      <div id="overlay" class="detection-overlay"></div>
+    </div>
+
+    <div class="scanner-controls">
+      <button id="toggle-cam" class="btn">Start camera</button>
+      <button id="capture" class="btn primary capture" disabled>Capture</button>
+    </div>
+
+    <div id="status" class="status-line">Enter the Mac IP in Settings, then start the camera.</div>
+
+    <section class="scan-queue">
+      <h2>Queue — keep scanning, GPU works one at a time</h2>
+      <div id="queue"></div>
+    </section>
   </div>
+
+  <div id="sheet" class="sheet">
+    <div class="sheet-card">
+      <h2>Mac connection</h2>
+      <p class="hint">This phone only talks to the Mac dashboard. Type the Mac’s Wi‑Fi IP and port (usually 8000). Token must match the Mac.</p>
+      <div class="field-row">
+        <div class="field">
+          <label>Mac IP</label>
+          <input id="cfg-host" inputmode="decimal" placeholder="192.168.1.50" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>Port</label>
+          <input id="cfg-port" inputmode="numeric" placeholder="8000" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Token</label>
+        <input id="cfg-token" placeholder="coinscope-dev-token-change-me" autocomplete="off" />
+      </div>
+      <p class="hint" id="cfg-msg"></p>
+      <div class="sheet-actions">
+        <button class="btn" id="cfg-cancel" type="button">Close</button>
+        <button class="btn primary" id="cfg-save" type="button">Save & test</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    // The app's real home is the scanner page on the Mac. When the Mac isn't
-    // reachable, this loader stays put so the user has visual feedback.
-    const target = "/scan";
-    setTimeout(() => { location.href = target; }, 800);
+    const KEYS = { host: "coinscope.host", port: "coinscope.port", token: "coinscope.token" };
+    const SAME_ORIGIN = location.pathname.indexOf("/scan") === 0;
+
+    function loadCfg() {
+      return {
+        host: localStorage.getItem(KEYS.host) || "",
+        port: localStorage.getItem(KEYS.port) || "8000",
+        token: localStorage.getItem(KEYS.token) || new URLSearchParams(location.search).get("token") || "coinscope-dev-token-change-me",
+      };
+    }
+    function saveCfg(c) {
+      localStorage.setItem(KEYS.host, c.host);
+      localStorage.setItem(KEYS.port, c.port);
+      localStorage.setItem(KEYS.token, c.token);
+    }
+    function apiBase() {
+      if (SAME_ORIGIN) return "";
+      const c = loadCfg();
+      if (!c.host) return "";
+      return "http://" + c.host.replace(/^https?:\/\//, "").replace(/\/$/, "") + ":" + (c.port || "8000");
+    }
+    function token() { return loadCfg().token; }
+    function api(path) { return apiBase() + path; }
+
+    let stream = null;
+    let camRunning = false;
+    let groupId = null;
+    let currentSide = 1;
+    let lastDetectionTs = 0;
+    let detectionStable = 0;
+    let scanning = false;
+    const localQueue = [];
+
+    const $ = id => document.getElementById(id);
+    const video = $("cam"), canvas = $("frame"), overlay = $("overlay");
+    const status = $("status"), queue = $("queue"), conn = $("conn");
+    const btnCam = $("toggle-cam"), btnCap = $("capture");
+    const DETECT_W = 240;
+
+    function openSheet(force) {
+      const c = loadCfg();
+      $("cfg-host").value = c.host;
+      $("cfg-port").value = c.port;
+      $("cfg-token").value = c.token;
+      $("cfg-msg").textContent = SAME_ORIGIN ? "Served from the Mac — IP is optional (same Wi‑Fi origin)." : "Required on the APK.";
+      $("sheet").classList.add("open");
+    }
+    function closeSheet() { $("sheet").classList.remove("open"); }
+    $("btn-settings").onclick = () => openSheet();
+    $("cfg-cancel").onclick = closeSheet;
+    $("cfg-save").onclick = async () => {
+      saveCfg({
+        host: $("cfg-host").value.trim(),
+        port: $("cfg-port").value.trim() || "8000",
+        token: $("cfg-token").value.trim() || "coinscope-dev-token-change-me",
+      });
+      $("cfg-msg").textContent = "Testing…";
+      const ok = await checkHealth();
+      $("cfg-msg").textContent = ok ? "Connected. You can scan." : "Cannot reach the Mac. Check IP, port, Wi‑Fi, and that python run.py is running.";
+      if (ok) closeSheet();
+    };
+
+    async function checkHealth() {
+      try {
+        const r = await fetch(api("/api/health"));
+        const h = await r.json();
+        if (h.ok) {
+          conn.textContent = h.ollama ? "Mac · " + (h.model || "model") : "Mac up · model offline";
+          conn.className = "connection-status " + (h.ollama ? "ok" : "warn");
+          if (!SAME_ORIGIN && !loadCfg().host) {
+            status.textContent = "Set the Mac IP in Settings.";
+          }
+          return true;
+        }
+        throw new Error("not ok");
+      } catch (e) {
+        conn.textContent = "No Mac";
+        conn.className = "connection-status bad";
+        return false;
+      }
+    }
+
+    async function startCamera() {
+      try {
+        status.textContent = "Requesting camera…";
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1920 },
+          },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        camRunning = true;
+        btnCam.textContent = "Stop camera";
+        btnCap.disabled = false;
+        status.textContent = "Hold a coin in the circle. Auto-captures when steady — or tap Capture.";
+        requestAnimationFrame(detectLoop);
+      } catch (e) {
+        status.textContent = "Camera error: " + e.message;
+        conn.className = "connection-status bad";
+      }
+    }
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      camRunning = false;
+      btnCam.textContent = "Start camera";
+      btnCap.disabled = true;
+      status.textContent = "Camera off.";
+    }
+
+    btnCam.onclick = () => camRunning ? stopCamera() : startCamera();
+    btnCap.onclick = () => captureNow();
+
+    function setupDetectCanvas() {
+      canvas.width = DETECT_W;
+      canvas.height = DETECT_W;
+      canvas.getContext("2d", { willReadFrequently: true });
+    }
+
+    function detectLoop() {
+      if (!camRunning) return;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, DETECT_W, DETECT_W);
+      const frame = ctx.getImageData(0, 0, DETECT_W, DETECT_W);
+      const d = frame.data;
+      const px = DETECT_W * DETECT_W;
+      const gray = new Uint8Array(px);
+      let mean = 0;
+      for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+        const v = (d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114) | 0;
+        gray[j] = v;
+        mean += v;
+      }
+      mean /= px;
+      const thr = Math.min(255, mean * 1.2 + 30);
+      let sumX = 0, sumY = 0, count = 0;
+      for (let y = 0; y < DETECT_W; y++) {
+        for (let x = 0; x < DETECT_W; x++) {
+          if (gray[y * DETECT_W + x] > thr) { sumX += x; sumY += y; count++; }
+        }
+      }
+      let score = 0;
+      if (count > 200) {
+        const cx = sumX / count, cy = sumY / count;
+        let varSum = 0;
+        for (let y = 0; y < DETECT_W; y++) {
+          for (let x = 0; x < DETECT_W; x++) {
+            if (gray[y * DETECT_W + x] > thr) {
+              const dx = x - cx, dy = y - cy;
+              varSum += dx * dx + dy * dy;
+            }
+          }
+        }
+        const r = Math.sqrt(count / Math.PI);
+        const fillRatio = count / (Math.PI * Math.max(r * 2, 1) ** 2);
+        score = fillRatio * (1 - Math.min(1, (varSum / count) / (r * r * 2)));
+        score *= Math.min(1, count / (DETECT_W * DETECT_W * 0.05));
+      }
+      const isCoin = score > 0.45 && count > 1500;
+      if (isCoin) {
+        detectionStable++;
+        overlay.classList.add("locked");
+        if (detectionStable > 8 && Date.now() - lastDetectionTs > 2800 && !scanning) {
+          lastDetectionTs = Date.now();
+          captureNow();
+        }
+      } else {
+        detectionStable = Math.max(0, detectionStable - 1);
+        overlay.classList.remove("locked");
+      }
+      overlay.style.borderColor = isCoin ? "var(--good)" : "var(--accent)";
+      requestAnimationFrame(detectLoop);
+    }
+
+    function cropBlobFromVideo() {
+      const w = video.videoWidth || 1280;
+      const h = video.videoHeight || 1280;
+      const side = Math.min(w, h);
+      const sx = (w - side) / 2;
+      const sy = (h - side) / 2;
+      // Overlay is inset 12% — crop that circle's bounding square with a little pad.
+      const inset = side * 0.10;
+      const cap = document.createElement("canvas");
+      const out = Math.min(1024, side - inset * 2);
+      cap.width = out;
+      cap.height = out;
+      const cctx = cap.getContext("2d");
+      cctx.drawImage(video, sx + inset, sy + inset, side - inset * 2, side - inset * 2, 0, 0, out, out);
+      return new Promise(res => cap.toBlob(res, "image/jpeg", 0.88));
+    }
+
+    async function captureNow() {
+      if (scanning) return;
+      if (!SAME_ORIGIN && !loadCfg().host) {
+        openSheet();
+        status.textContent = "Set the Mac IP first.";
+        return;
+      }
+      scanning = true;
+      const side = currentSide === 1 ? "obverse" : "reverse";
+      status.textContent = "Uploading " + side + "…";
+      status.classList.add("active");
+
+      const blob = await cropBlobFromVideo();
+      if (currentSide === 1) {
+        groupId = "g_" + Math.random().toString(36).slice(2, 10);
+      }
+
+      const fd = new FormData();
+      fd.append("image", blob, side + ".jpg");
+      fd.append("side", side);
+      fd.append("side_index", currentSide);
+      fd.append("group_id", groupId);
+
+      try {
+        const r = await fetch(api("/api/upload"), {
+          method: "POST",
+          headers: { "X-Coinscope-Token": token() },
+          body: fd,
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || "upload failed");
+
+        addQueueRow(j.scan_id, side);
+        status.textContent = currentSide === 1
+          ? "Front queued (#" + j.scan_id + "). Flip for reverse, or scan the next coin."
+          : "Reverse queued. Ready for the next coin.";
+
+        if (currentSide === 1) {
+          currentSide = 2;
+        } else {
+          currentSide = 1;
+          groupId = null;
+        }
+      } catch (e) {
+        status.textContent = "Upload error: " + e.message;
+      } finally {
+        scanning = false;
+        status.classList.remove("active");
+      }
+    }
+
+    function addQueueRow(scanId, side) {
+      localQueue.unshift({ id: scanId, side });
+      const row = document.createElement("div");
+      row.className = "queue-row";
+      row.id = "q_" + scanId;
+      row.innerHTML =
+        '<span style="font-family:var(--mono);color:var(--text-dim);">#' + scanId + "</span>" +
+        '<span class="badge queued">queued</span>' +
+        '<span style="color:var(--text-dim);">' + side + "</span>";
+      queue.prepend(row);
+    }
+
+    async function pollScans() {
+      if (!apiBase() && !SAME_ORIGIN) return;
+      try {
+        const r = await fetch(api("/api/scans?limit=20"), { headers: { "X-Coinscope-Token": token() } });
+        const j = await r.json();
+        for (const s of (j.scans || [])) {
+          const row = document.getElementById("q_" + s.id);
+          if (!row) continue;
+          const badge = row.querySelector(".badge");
+          badge.className = "badge " + s.status;
+          badge.textContent = s.status === "complete" ? ((s.rarity_flag || (s.rarity && s.rarity.flag) || "done")) : s.status;
+          const last = row.lastElementChild;
+          if (s.status === "complete") {
+            const ident = s.identification || {};
+            const rar = s.rarity || {};
+            last.textContent = (ident.series || "Coin") + " · " + (rar.flag || rar.rarity_tier || "?");
+          } else if (s.status === "error") {
+            last.textContent = "error";
+            last.style.color = "var(--bad)";
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    setupDetectCanvas();
+    if (!SAME_ORIGIN && !loadCfg().host) openSheet();
+    checkHealth();
+    setInterval(pollScans, 2000);
+    setInterval(checkHealth, 10000);
+    pollScans();
   </script>
 </body>
 </html>

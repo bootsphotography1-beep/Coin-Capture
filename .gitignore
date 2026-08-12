@@ -1,6 +1,7 @@
 # --- Runtime / data (regenerated on first run) ---
 data/coinscope.db
 data/photos/
+data/setup.json
 *.db
 *.db-journal
 *.db-shm
